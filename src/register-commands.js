@@ -17,6 +17,16 @@ const commands = [
         .setRequired(true)
     )
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("kvkmatches")
+    .setDescription("Get all available KvK records for a kingdom")
+    .addIntegerOption((o) =>
+      o
+        .setName("kingdom_id")
+        .setDescription("Kingdom ID (example: 220)")
+        .setRequired(true)
+    )
+    .toJSON(),
 ];
 
 async function main() {

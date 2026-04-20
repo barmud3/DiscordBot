@@ -67,6 +67,7 @@ Keep this process running while the bot should be online (close the terminal = b
 ## Part 3 — Use in your community
 
 - Slash command: **`/kingshot player_id:`** then enter the numeric in-game ID (e.g. `8767319`).
+- Slash command: **`/kvkmatches kingdom_id:`** to fetch all available KvK records for one kingdom (both sides).
 - If `ENABLE_SIMPLE_MESSAGES=true`, posting only the ID (digits) in the allowed channel also triggers a lookup.
 
 Tell members: **only share IDs in public channels if they are comfortable**; IDs can be used to look up public profile data via the API.
@@ -97,6 +98,6 @@ Use Node 18+ on the host. Do **not** commit `.env` to git.
 
 ## API reference
 
-- [https://kingshot.net/api-docs](https://kingshot.net/api-docs) — `GET /api/player-info?playerId=`
+- [https://kingshot.net/api-docs](https://kingshot.net/api-docs) — `GET /api/player-info?playerId=`, `GET /api/kvk/matches`
 
 This project is not affiliated with Discord or Kingshot; use in line with their terms.
