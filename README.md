@@ -51,6 +51,7 @@ Enable **Developer Mode** in Discord: **User Settings → App Settings → Advan
    - `DISCORD_CLIENT_ID` — Application ID  
    - `GUILD_ID` — your server ID (recommended so `/kingshot` appears within minutes)  
    - `ALLOWED_CHANNEL_ID` — leave empty to allow all channels, or set to lock lookups to one channel  
+   - `BRAND_IMAGE_URL` — optional image URL used as thumbnail on KvK/Kingdom embeds  
    - `ENABLE_SIMPLE_MESSAGES` — `true` to also reply when someone sends a message that is **only digits** (player ID). Requires **Message Content Intent** on the bot.
 
 3. Install dependencies and start:
@@ -68,6 +69,7 @@ Keep this process running while the bot should be online (close the terminal = b
 
 - Slash command: **`/kingshot player_id:`** then enter the numeric in-game ID (e.g. `8767319`).
 - Slash command: **`/kvkmatches kingdom_id:`** to fetch all available KvK records for one kingdom (both sides).
+- Slash command: **`/kingdomage kingdom_id:`** to show kingdom age and open time.
 - If `ENABLE_SIMPLE_MESSAGES=true`, posting only the ID (digits) in the allowed channel also triggers a lookup.
 
 Tell members: **only share IDs in public channels if they are comfortable**; IDs can be used to look up public profile data via the API.

@@ -27,6 +27,16 @@ const commands = [
         .setRequired(true)
     )
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("kingdomage")
+    .setDescription("Show kingdom age and open time")
+    .addIntegerOption((o) =>
+      o
+        .setName("kingdom_id")
+        .setDescription("Kingdom ID (example: 220)")
+        .setRequired(true)
+    )
+    .toJSON(),
 ];
 
 async function main() {

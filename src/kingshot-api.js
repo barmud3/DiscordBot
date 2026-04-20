@@ -28,6 +28,8 @@ const idCache = new Map();
 const CACHE_TTL_MS = 60_000;
 const kvkCache = new Map();
 const KVK_CACHE_TTL_MS = 60_000;
+const kingdomCache = new Map();
+const KINGDOM_CACHE_TTL_MS = 60_000;
 
 /**
  * @param {string} playerId
@@ -226,4 +228,74 @@ async function fetchKvkMatchesForKingdom(options) {
   return { ok: true, data: deduped };
 }
 
-module.exports = { fetchPlayerInfo, fetchKvkMatches, fetchKvkMatchesForKingdom };
+/**
+ * @param {number} kingdomId
+ * @returns {Promise<{ ok: true, data: any } | { ok: false, code: string, message: string }>}
+ */
+async function fetchKingdomTrackerById(kingdomId) {
+  const id = Number(kingdomId);
+  if (!Number.isFinite(id) || id <= 0) {
+    return { ok: false, code: "BAD_REQUEST", message: "Invalid kingdom ID." };
+  }
+
+  const cacheKey = String(id);
+  const cached = kingdomCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < KINGDOM_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data };
+  }
+
+  const url = `${API_BASE}/kingdom-tracker?kingdomId=${encodeURIComponent(String(id))}`;
+  let res;
+  try {
+    res = await fetch(url, { headers: { Accept: "application/json" } });
+  } catch (_) {
+    return {
+      ok: false,
+      code: "NETWORK",
+      message: "Could not reach Kingshot API. Check your connection or try again later.",
+    };
+  }
+
+  if (res.status === 429) {
+    return {
+      ok: false,
+      code: "API_RATE_LIMIT",
+      message: "Kingshot API rate limit reached. Try again in a minute.",
+    };
+  }
+
+  let body;
+  try {
+    body = await res.json();
+  } catch (_) {
+    return {
+      ok: false,
+      code: "BAD_RESPONSE",
+      message: "Unexpected response from Kingshot API.",
+    };
+  }
+
+  if (!res.ok || body.status !== "success") {
+    const msg =
+      typeof body?.message === "string"
+        ? body.message
+        : "Could not retrieve kingdom tracker data.";
+    return { ok: false, code: "BAD_REQUEST", message: msg };
+  }
+
+  const servers = Array.isArray(body?.data?.servers) ? body.data.servers : [];
+  const kingdom = servers.find((s) => Number(s.kingdomId) === id) ?? null;
+  if (!kingdom) {
+    return { ok: false, code: "NOT_FOUND", message: `No tracker data found for kingdom #${id}.` };
+  }
+
+  kingdomCache.set(cacheKey, { at: Date.now(), data: kingdom });
+  return { ok: true, data: kingdom };
+}
+
+module.exports = {
+  fetchPlayerInfo,
+  fetchKvkMatches,
+  fetchKvkMatchesForKingdom,
+  fetchKingdomTrackerById,
+};

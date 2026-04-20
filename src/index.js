@@ -1,20 +1,31 @@
 require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
 const {
   Client,
   Events,
   GatewayIntentBits,
   EmbedBuilder,
+  AttachmentBuilder,
   REST,
   Routes,
   SlashCommandBuilder,
   ActivityType,
 } = require("discord.js");
-const { fetchPlayerInfo, fetchKvkMatches, fetchKvkMatchesForKingdom } = require("./kingshot-api");
+const {
+  fetchPlayerInfo,
+  fetchKvkMatches,
+  fetchKvkMatchesForKingdom,
+  fetchKingdomTrackerById,
+} = require("./kingshot-api");
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
 const guildId = process.env.GUILD_ID || "";
 const allowedChannelId = process.env.ALLOWED_CHANNEL_ID || "";
+const brandImageUrl = process.env.BRAND_IMAGE_URL || "";
+const localBrandImagePath = path.join(__dirname, "..", "img", "pazam.png");
+const localBrandImageName = "pazam.png";
 const enableSimpleMessages =
   String(process.env.ENABLE_SIMPLE_MESSAGES).toLowerCase() === "true";
 
@@ -44,11 +55,40 @@ const commands = [
         .setRequired(true)
     )
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("kingdomage")
+    .setDescription("Show kingdom age and open time")
+    .addIntegerOption((o) =>
+      o
+        .setName("kingdom_id")
+        .setDescription("Kingdom ID (example: 220)")
+        .setRequired(true)
+    )
+    .toJSON(),
 ];
 
 function channelAllowed(channelId) {
   if (!allowedChannelId) return true;
   return channelId === allowedChannelId;
+}
+
+function applyBrandThumbnail(embed) {
+  if (fs.existsSync(localBrandImagePath)) {
+    embed.setThumbnail(`attachment://${localBrandImageName}`);
+  } else if (/^https?:\/\//i.test(brandImageUrl)) {
+    embed.setThumbnail(brandImageUrl);
+  }
+  return embed;
+}
+
+function getBrandAttachments() {
+  if (!fs.existsSync(localBrandImagePath)) return [];
+  return [new AttachmentBuilder(localBrandImagePath, { name: localBrandImageName })];
+}
+
+function buildEmbedReplyPayload(embeds) {
+  const files = getBrandAttachments();
+  return files.length ? { embeds, files } : { embeds };
 }
 
 function buildPlayerEmbed(d, fallbackId) {
@@ -186,6 +226,88 @@ function buildKvkMatchesEmbeds(matches, options, pagination) {
   return embeds;
 }
 
+function formatMonthsDaysFromDate(dateInput) {
+  const d = new Date(dateInput);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+
+  const now = new Date();
+  let years = now.getUTCFullYear() - d.getUTCFullYear();
+  let months = now.getUTCMonth() - d.getUTCMonth();
+  let days = now.getUTCDate() - d.getUTCDate();
+
+  if (days < 0) {
+    months -= 1;
+    const prevMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0)).getUTCDate();
+    days += prevMonth;
+  }
+  if (months < 0) {
+    years -= 1;
+    months += 12;
+  }
+
+  const totalMonths = Math.max(0, years * 12 + months);
+  return `${totalMonths} חודשים, ${Math.max(days, 0)} ימים`;
+}
+
+function formatOpenDate(dateInput) {
+  const d = new Date(dateInput);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+async function replyWithKingdomAge(interaction) {
+  const kingdomId = interaction.options.getInteger("kingdom_id", true);
+  await interaction.deferReply();
+
+  const result = await fetchKingdomTrackerById(kingdomId);
+  if (!result.ok) {
+    await interaction.editReply({ content: result.message });
+    return;
+  }
+
+  const k = result.data;
+  const pazam = formatMonthsDaysFromDate(k.openTime);
+  const openTime = formatOpenDate(k.openTime);
+
+  const embed = applyBrandThumbnail(
+    new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`פז\"מ של השרת #${k.kingdomId}`)
+      .setDescription(`🕒 ${pazam}\n📅 ${openTime}`)
+      .setFooter({ text: "Source: kingshot.net/api/kingdom-tracker" })
+  );
+
+  await interaction.editReply(buildEmbedReplyPayload([embed]));
+}
+
+/**
+ * @param {number} kingdomId
+ * @returns {Promise<{ ok: true, embed: import('discord.js').EmbedBuilder } | { ok: false, message: string }>}
+ */
+async function buildKingdomAgeEmbed(kingdomId) {
+  const result = await fetchKingdomTrackerById(kingdomId);
+  if (!result.ok) {
+    return { ok: false, message: result.message };
+  }
+
+  const k = result.data;
+  const pazam = formatMonthsDaysFromDate(k.openTime);
+  const openTime = formatOpenDate(k.openTime);
+
+  const embed = applyBrandThumbnail(
+    new EmbedBuilder()
+      .setColor(0x5865f2)
+      .setTitle(`פז\"מ של השרת #${k.kingdomId}`)
+      .setDescription(`${pazam} 🕒\n${openTime} 📅`)
+      .setFooter({ text: "Source: kingshot.net/api/kingdom-tracker" })
+  );
+
+  return { ok: true, embed };
+}
+
 /**
  * @param {import('discord.js').Interaction} interaction
  * @param {string} rawId
@@ -286,7 +408,7 @@ client.once(Events.ClientReady, async (c) => {
 
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (!["kingshot", "kvkmatches"].includes(interaction.commandName)) return;
+  if (!["kingshot", "kvkmatches", "kingdomage"].includes(interaction.commandName)) return;
 
   if (!channelAllowed(interaction.channelId)) {
     await interaction.reply({
@@ -305,6 +427,11 @@ client.on("interactionCreate", async (interaction) => {
 
     if (interaction.commandName === "kvkmatches") {
       await replyWithKvkMatches(interaction);
+      return;
+    }
+
+    if (interaction.commandName === "kingdomage") {
+      await replyWithKingdomAge(interaction);
       return;
     }
   } catch (err) {
@@ -333,6 +460,19 @@ if (enableSimpleMessages) {
     if (!channelAllowed(message.channelId)) return;
 
     const content = message.content.trim();
+
+    const pazamMatch = content.match(/^פז["״']?מ\s*#?(\d{1,4})$/);
+    if (pazamMatch) {
+      const kingdomId = Number(pazamMatch[1]);
+      const ageRes = await buildKingdomAgeEmbed(kingdomId);
+      if (!ageRes.ok) {
+        await message.reply({ content: ageRes.message });
+        return;
+      }
+      await message.reply(buildEmbedReplyPayload([ageRes.embed]));
+      return;
+    }
+
     if (!/^\d{1,20}$/.test(content)) return;
 
     // Kingdom IDs are short numbers in this flow (1-4 digits).
