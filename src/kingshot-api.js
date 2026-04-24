@@ -382,6 +382,27 @@ async function fetchGovernorGearOptimization(input) {
     return -1;
   };
 
+  /** @see optimizer API `weightSettings.profile` enum */
+  const GOVERNOR_GEAR_WEIGHT_PROFILE_IDS = new Set([
+    "combat",
+    "balance",
+    "unweighted",
+    "custom",
+    "attackTank",
+    "extremeInfantry",
+    "extremeArchery",
+    "extremeCavalry",
+    "userCustom",
+    "earlyGameGrowth",
+    "earlyGameCombat",
+    "gen4NewNormal",
+  ]);
+
+  const normalizeGovernorGearWeightProfile = (profile) => {
+    if (profile === "futureProofed") return "gen4NewNormal";
+    return profile;
+  };
+
   const payload = {
     resources: {
       satin: Number(input.satin || 0),
@@ -399,6 +420,11 @@ async function fetchGovernorGearOptimization(input) {
     troopTypeFilter: "all",
     optimizationMode: "optimize-stats",
     maxUpgrades: 100,
+    weightSettings: {
+      enabled: true,
+      profile: "gen4NewNormal",
+      scalingAmplifier: 1.25,
+    },
   };
 
   if (input.troopTypeFilter && ["all", "infantry", "cavalry", "archery"].includes(input.troopTypeFilter)) {
@@ -410,18 +436,17 @@ async function fetchGovernorGearOptimization(input) {
   if (Number.isFinite(Number(input.maxUpgrades)) && Number(input.maxUpgrades) > 0) {
     payload.maxUpgrades = Math.floor(Number(input.maxUpgrades));
   }
-  if (
-    input.weightSettings &&
-    input.weightSettings.enabled &&
-    ["earlyGameGrowth", "earlyGameCombat", "futureProofed", "unweighted"].includes(input.weightSettings.profile)
-  ) {
-    payload.weightSettings = {
-      enabled: true,
-      profile: input.weightSettings.profile,
-      scalingAmplifier: Number.isFinite(Number(input.weightSettings.scalingAmplifier))
-        ? Number(input.weightSettings.scalingAmplifier)
-        : 1.25,
-    };
+  if (input.weightSettings && input.weightSettings.enabled && input.weightSettings.profile) {
+    const profile = normalizeGovernorGearWeightProfile(input.weightSettings.profile);
+    if (GOVERNOR_GEAR_WEIGHT_PROFILE_IDS.has(profile)) {
+      payload.weightSettings = {
+        enabled: true,
+        profile,
+        scalingAmplifier: Number.isFinite(Number(input.weightSettings.scalingAmplifier))
+          ? Number(input.weightSettings.scalingAmplifier)
+          : 1.25,
+      };
+    }
   }
 
   let res;

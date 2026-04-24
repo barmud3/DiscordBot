@@ -7,6 +7,7 @@ const {
   GatewayIntentBits,
   MessageFlags,
   EmbedBuilder,
+  AttachmentBuilder,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -31,6 +32,18 @@ const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
 const guildId = process.env.GUILD_ID || "";
 const brandImageUrl = process.env.BRAND_IMAGE_URL || "";
+const localBrandImagePath = path.join(__dirname, "..", "img", "pazam.png");
+const localBrandImageName = "pazam.png";
+const nicknameChannelId = (process.env.NICKNAME_CHANNEL_ID || "").trim();
+const enableNicknameChannel = Boolean(nicknameChannelId);
+const nicknameCooldownSec = Math.max(
+  0,
+  Number.parseInt(String(process.env.NICKNAME_COOLDOWN_SECONDS || "60"), 10) || 0
+);
+const nicknameDeleteMessage =
+  String(process.env.NICKNAME_DELETE_MESSAGE || "").toLowerCase() === "true";
+/** @type {Map<string, number>} */
+const nicknameCooldownUntil = new Map();
 
 if (!token || !clientId) {
   console.error("Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in .env");
@@ -189,7 +202,13 @@ const pendingGovGearSubmissions = new Map();
 const govGearChatSessions = new Map();
 const govGearModalSessions = new Map();
 const GOV_GEAR_MEMORY_FILE = path.resolve(__dirname, "..", "data", "govgear-user-memory.json");
-const GOV_GEAR_CHAT_TRIGGER_PHRASES = new Set(["hero gear", "הירו גיר"]);
+const GOV_GEAR_CHAT_TRIGGER_PHRASES = new Set([
+  "gov gear",
+  "government gear",
+  "goverment gear",
+  "גוב גיר",
+  "גוברמנט גיר",
+]);
 const GOV_GEAR_CHAT_CANCEL_PHRASES = new Set(["cancel", "exit", "stop", "quit"]);
 
 const GOV_GEAR_CHAT_STEPS = [
@@ -222,12 +241,6 @@ function govGearSlotStepLine(slotIndex) {
   return `**Step ${step}/${GOV_GEAR_SLOT_COUNT}** — ${label}`;
 }
 
-function formatDiscordTimestampFromUnix(unixSeconds) {
-  const n = Number(unixSeconds);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  return `<t:${Math.floor(n)}:F>`;
-}
-
 function pickPlayerIdValue(data) {
   return (
     data.id ??
@@ -238,6 +251,358 @@ function pickPlayerIdValue(data) {
     data.user_id ??
     null
   );
+}
+
+/**
+ * Build a server nickname: display name + " #<kingdomId>" (max 32 chars for Discord).
+ * If the name already ends with "#<digits>", replace that suffix with the new kingdom id.
+ */
+function buildKingdomSuffixNickname(displayName, kingdomDigits) {
+  const suffix = ` #${kingdomDigits}`;
+  const maxLen = 32;
+  const maxBase = maxLen - suffix.length;
+  if (maxBase < 1) {
+    return kingdomDigits.slice(0, maxLen);
+  }
+  let base = String(displayName || "member")
+    .replace(/[\u0000-\u001F\u007F]/g, "")
+    .replace(/@/g, "")
+    .trim();
+  if (!base) base = "member";
+  if (/(?:\s+)?#\d+$/.test(base)) {
+    base = base.replace(/(?:\s+)?#\d+$/, "").trim();
+  }
+  if (!base) base = "member";
+  if (base.length > maxBase) base = base.slice(0, maxBase);
+  return `${base}${suffix}`;
+}
+
+/** @param {import("discord.js").Message} message */
+async function handleNicknameChannelMessage(message) {
+  const content = message.content.trim();
+  if (!/^\d{1,4}$/.test(content)) return;
+
+  const now = Date.now();
+  if (nicknameCooldownSec > 0) {
+    const key = `${message.guildId}:${message.author.id}`;
+    const until = nicknameCooldownUntil.get(key) || 0;
+    if (now < until) {
+      const waitSec = Math.ceil((until - now) / 1000);
+      await message.reply({
+        content: `Please wait ${waitSec}s before changing your nickname again.`,
+      });
+      return;
+    }
+    nicknameCooldownUntil.set(key, now + nicknameCooldownSec * 1000);
+  }
+
+  let member = message.member;
+  if (!member) {
+    try {
+      member = await message.guild.members.fetch(message.author.id);
+    } catch {
+      await message.reply({ content: "Could not load your member profile. Try again." });
+      return;
+    }
+  }
+
+  const kingdomDigits = content;
+  const displayName = member.displayName || member.user.username;
+  const newNick = buildKingdomSuffixNickname(displayName, kingdomDigits);
+
+  try {
+    await member.setNickname(newNick);
+  } catch (err) {
+    const code = err.code ?? err?.rawError?.code;
+    if (nicknameCooldownSec > 0) {
+      const key = `${message.guildId}:${message.author.id}`;
+      nicknameCooldownUntil.delete(key);
+    }
+    if (code === 50013) {
+      await message.reply({
+        content:
+          "I cannot set your nickname (missing **Manage Nicknames**, or your highest role is above the bot's role, or you are the server owner). Ask an admin to fix role order or permissions.",
+      });
+      return;
+    }
+    console.error("setNickname failed:", err);
+    await message.reply({
+      content: "Could not set nickname. Check the format and try again, or ask a moderator.",
+    });
+    return;
+  }
+
+  if (nicknameDeleteMessage) {
+    try {
+      await message.delete();
+    } catch {
+      /* ignore — may lack Manage Messages */
+    }
+  } else {
+    try {
+      await message.react("✅");
+    } catch {
+      await message.reply({ content: `Nickname set to: **${newNick}**` });
+    }
+  }
+}
+
+function applyBrandThumbnail(embed) {
+  if (fs.existsSync(localBrandImagePath)) {
+    embed.setThumbnail(`attachment://${localBrandImageName}`);
+  } else if (/^https?:\/\//i.test(brandImageUrl)) {
+    embed.setThumbnail(brandImageUrl);
+  }
+  return embed;
+}
+
+function getBrandAttachments() {
+  if (!fs.existsSync(localBrandImagePath)) return [];
+  return [new AttachmentBuilder(localBrandImagePath, { name: localBrandImageName })];
+}
+
+function buildEmbedReplyPayload(embeds) {
+  const files = getBrandAttachments();
+  return files.length ? { embeds, files } : { embeds };
+}
+
+function formatMonthsDaysFromDate(dateInput) {
+  const d = new Date(dateInput);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+
+  const now = new Date();
+  let years = now.getUTCFullYear() - d.getUTCFullYear();
+  let months = now.getUTCMonth() - d.getUTCMonth();
+  let days = now.getUTCDate() - d.getUTCDate();
+
+  if (days < 0) {
+    months -= 1;
+    const prevMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0)).getUTCDate();
+    days += prevMonth;
+  }
+  if (months < 0) {
+    years -= 1;
+    months += 12;
+  }
+
+  const totalMonths = Math.max(0, years * 12 + months);
+  return `${totalMonths} חודשים, ${Math.max(days, 0)} ימים`;
+}
+
+function formatOpenDate(dateInput) {
+  const d = new Date(dateInput);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+function getKingdomOpenTimeDate(data) {
+  const raw =
+    data.openTime ??
+    data.open_time ??
+    data.open_at ??
+    data.openAt ??
+    data.create_time ??
+    data.createTime;
+  if (raw == null || raw === "") return null;
+  if (typeof raw === "number") {
+    const ms = raw < 1e12 ? raw * 1000 : raw;
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function buildKingdomAgePazamEmbed(data) {
+  const openDate = getKingdomOpenTimeDate(data);
+  const kingdomId = data.kingdomId ?? data.kingdom_id;
+  const pazam = openDate ? formatMonthsDaysFromDate(openDate) : "Unknown";
+  const openTimeStr = openDate ? formatOpenDate(openDate) : "Unknown";
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`פז\"מ של השרת #${kingdomId}`)
+    .setDescription(`🕒 ${pazam}\n📅 ${openTimeStr}`)
+    .setFooter({ text: "Source: kingshot.net/api/kingdom-tracker" });
+  return applyBrandThumbnail(embed);
+}
+
+function normalizePlayerApiRow(data, fallbackId) {
+  const id = pickPlayerIdValue(data) ?? fallbackId;
+  const kingdomNum = data.kingdomId ?? data.kingdom_id ?? data.serverId ?? data.server_id;
+  let kingdom = "—";
+  if (data.kingdom != null && String(data.kingdom).trim()) kingdom = String(data.kingdom).trim();
+  else if (kingdomNum != null && Number.isFinite(Number(kingdomNum))) kingdom = `#${kingdomNum}`;
+  else if (kingdomNum != null) kingdom = String(kingdomNum);
+
+  const level = data.level ?? data.castleLevel ?? data.castle_level;
+  const levelRenderedDetailed =
+    data.levelRenderedDetailed ||
+    data.level_rendered_detailed ||
+    (level != null && level !== "" ? `Level ${level}` : undefined);
+
+  const name = data.name || data.nickname || data.nickName || "Player";
+
+  const pickUrl = (v) => {
+    const s = v == null ? "" : String(v).trim();
+    return /^https?:\/\//i.test(s) ? s : null;
+  };
+  const profilePhoto =
+    pickUrl(data.profilePhoto) ||
+    pickUrl(data.profile_photo) ||
+    pickUrl(data.avatar) ||
+    pickUrl(data.avatarUrl) ||
+    pickUrl(data.profileImage) ||
+    pickUrl(data.image);
+
+  const levelImage =
+    pickUrl(data.levelImage) || pickUrl(data.level_image) || pickUrl(data.levelImageUrl);
+
+  return {
+    name,
+    playerId: id,
+    kingdom,
+    level,
+    levelRenderedDetailed,
+    profilePhoto,
+    levelImage,
+  };
+}
+
+function buildPlayerEmbed(d, fallbackId) {
+  const embed = new EmbedBuilder()
+    .setColor(0xc9a227)
+    .setTitle(d.name || "Player")
+    .addFields(
+      { name: "Player ID", value: String(d.playerId ?? fallbackId), inline: true },
+      { name: "Kingdom", value: String(d.kingdom ?? "—"), inline: true },
+      {
+        name: "Level",
+        value: d.levelRenderedDetailed || `Level ${d.level ?? "?"}`,
+        inline: true,
+      }
+    )
+    .setFooter({
+      text: "Level from kingshot.net API (main account progression).",
+    });
+
+  if (d.profilePhoto && /^https?:\/\//i.test(d.profilePhoto)) {
+    embed.setThumbnail(d.profilePhoto);
+  }
+  if (d.levelImage && /^https?:\/\//i.test(d.levelImage)) {
+    embed.setImage(d.levelImage);
+  }
+  return embed;
+}
+
+function buildKvkMatchesEmbeds(matches, options, pagination) {
+  const sortedMatches = [...matches].sort((a, b) => {
+    const seasonDiff = Number(b.season_id ?? 0) - Number(a.season_id ?? 0);
+    if (seasonDiff !== 0) return seasonDiff;
+    return Number(b.kvk_id ?? 0) - Number(a.kvk_id ?? 0);
+  });
+
+  const cards = sortedMatches.map((m, idx) => {
+    const castleWinner =
+      Number.isFinite(Number(m.castle_winner)) && Number(m.castle_winner) > 0
+        ? `#${m.castle_winner}`
+        : "Unknown";
+    const prepWinner =
+      Number.isFinite(Number(m.prep_winner)) && Number(m.prep_winner) > 0
+        ? `#${m.prep_winner}`
+        : "Unknown";
+    const season = m.kvk_title || `Season #${m.season_id ?? "?"}`;
+
+    let perspective = "UNKNOWN";
+    if (Number.isFinite(Number(options.kingdomId))) {
+      const k = Number(options.kingdomId);
+      if (Number(m.castle_winner) === k) perspective = "WIN";
+      else if (Number(m.kingdom_a) === k || Number(m.kingdom_b) === k) perspective = "LOSS";
+    }
+
+    const resultBadge =
+      perspective === "WIN" ? "🟢 WIN" : perspective === "LOSS" ? "🔴 LOSS" : "⚪ UNKNOWN";
+    const titlePrefix = idx % 3 === 0 ? "" : "│ ";
+    const linePrefix = idx % 3 === 0 ? "" : "│ ";
+    const valueLines = [
+      `⚔️ #${m.kingdom_a} vs #${m.kingdom_b}`,
+      `🥇 Prep: ${prepWinner}`,
+      `👑 Castle: ${castleWinner}`,
+      `${resultBadge}`,
+    ].map((line) => `${linePrefix}${line}`);
+    return {
+      name: `${titlePrefix}${idx + 1}) ${season}`,
+      value: valueLines.join("\n"),
+    };
+  });
+
+  const total = sortedMatches.length;
+  const kingdom = Number(options.kingdomId);
+  const wins = sortedMatches.filter((m) => Number(m.castle_winner) === kingdom).length;
+  const losses = sortedMatches.filter(
+    (m) =>
+      (Number(m.kingdom_a) === kingdom || Number(m.kingdom_b) === kingdom) &&
+      Number(m.castle_winner) !== kingdom
+  ).length;
+  const winRate = total ? Math.round((wins / total) * 100) : 0;
+
+  const CARDS_PER_EMBED = 12;
+  const chunks = [];
+  for (let i = 0; i < cards.length; i += CARDS_PER_EMBED) {
+    chunks.push(cards.slice(i, i + CARDS_PER_EMBED));
+  }
+
+  const maxEmbeds = 10;
+  const limitedChunks = chunks.slice(0, maxEmbeds);
+  const truncated = chunks.length > maxEmbeds;
+  const embeds = limitedChunks.map((chunkCards, idx) => {
+    const titleSuffix = limitedChunks.length > 1 ? ` (Part ${idx + 1}/${limitedChunks.length})` : "";
+    const summary = `📊 **Summary** • Matches: **${total}** • Wins: **${wins}** • Losses: **${losses}** • Win Rate: **${winRate}%**`;
+    const embed = new EmbedBuilder()
+      .setColor(wins >= losses ? 0x2ecc71 : 0xe67e22)
+      .setTitle(`Kingshot KVK Matches (${total})${titleSuffix}`)
+      .setDescription(idx === 0 ? summary : "More records:")
+      .setFooter({ text: "Source: kingshot.net/api/kvk/matches" });
+
+    if (idx === 0 && options.kingdomId !== undefined) {
+      embed.addFields({ name: "Kingdom", value: `#${options.kingdomId}`, inline: false });
+    }
+    if (idx === 0 && pagination && pagination.total !== undefined) {
+      embed.addFields({
+        name: "Pagination",
+        value: `Page ${pagination.page ?? 1} / ${pagination.totalPages ?? "?"} (total ${pagination.total})`,
+        inline: true,
+      });
+    }
+    const fields = [];
+    for (let i = 0; i < chunkCards.length; i++) {
+      fields.push({ name: chunkCards[i].name, value: chunkCards[i].value, inline: true });
+      const isEndOfRow = (i + 1) % 3 === 0;
+      const hasMore = i < chunkCards.length - 1;
+      if (isEndOfRow && hasMore) {
+        fields.push({
+          name: "\u200b",
+          value: "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+          inline: false,
+        });
+      }
+    }
+
+    embed.addFields(fields);
+    return embed;
+  });
+
+  if (truncated && embeds.length) {
+    const last = embeds[embeds.length - 1];
+    last.addFields({
+      name: "Note",
+      value: "Too many records to display in one message. Showing first pages of results.",
+      inline: false,
+    });
+  }
+  return embeds;
 }
 
 function normalizeGovGearLevel(value) {
@@ -312,17 +677,49 @@ function parseRequestIdFromCustomId(customId, expectedPrefix) {
   return customId.slice(expectedPrefix.length);
 }
 
-function parseGovernorAdvancedSettingsFromFields(fields) {
-  const profileRaw = String(fields.getTextInputValue("weightProfile") || "").trim().toLowerCase();
-  const profileMap = {
+/** Optimizer API `weightSettings.profile` values (API removed legacy `futureProofed`; use `gen4NewNormal`). */
+const GOV_GEAR_WEIGHT_PROFILE_API_IDS = [
+  "combat",
+  "balance",
+  "unweighted",
+  "custom",
+  "attackTank",
+  "extremeInfantry",
+  "extremeArchery",
+  "extremeCavalry",
+  "userCustom",
+  "earlyGameGrowth",
+  "earlyGameCombat",
+  "gen4NewNormal",
+];
+
+function resolveGovGearWeightProfileFromModalInput(raw) {
+  const trimmed = String(raw || "").trim();
+  if (!trimmed) return null;
+  const key = trimmed.replace(/\s+/g, "").toLowerCase();
+  /** Shorthand checked first so `combat` means early-game combat, not API profile `combat`. */
+  const shorthand = {
     growth: "earlyGameGrowth",
     earlygamegrowth: "earlyGameGrowth",
     combat: "earlyGameCombat",
     earlygamecombat: "earlyGameCombat",
-    future: "futureProofed",
-    futureproofed: "futureProofed",
+    future: "gen4NewNormal",
+    futureproofed: "gen4NewNormal",
+    gen4: "gen4NewNormal",
+    gen4newnormal: "gen4NewNormal",
+    balance: "balance",
     unweighted: "unweighted",
+    unw: "unweighted",
+    globalcombat: "combat",
   };
+  if (shorthand[key]) return shorthand[key];
+  const exact = GOV_GEAR_WEIGHT_PROFILE_API_IDS.find((p) => p === trimmed);
+  if (exact) return exact;
+  return GOV_GEAR_WEIGHT_PROFILE_API_IDS.find((p) => p.toLowerCase() === trimmed.toLowerCase()) || null;
+}
+
+function parseGovernorAdvancedSettingsFromFields(fields) {
+  const profileRaw = String(fields.getTextInputValue("weightProfile") || "").trim();
   const troopRaw = String(fields.getTextInputValue("troopTypeFilter") || "").trim().toLowerCase();
   const troopMap = { all: "all", infantry: "infantry", cavalry: "cavalry", archery: "archery", archer: "archery" };
   const modeRaw = String(fields.getTextInputValue("optimizationMode") || "").trim().toLowerCase();
@@ -332,8 +729,14 @@ function parseGovernorAdvancedSettingsFromFields(fields) {
 
   const out = {};
   if (profileRaw) {
-    const mapped = profileMap[profileRaw.replace(/\s+/g, "")];
-    if (!mapped) return { ok: false, message: "Invalid Weight profile. Use: growth, combat, future, or unweighted." };
+    const mapped = resolveGovGearWeightProfileFromModalInput(profileRaw);
+    if (!mapped) {
+      return {
+        ok: false,
+        message:
+          "Invalid Weight profile. Shortcuts: **growth**, **combat** (early-game), **future** / **gen4** (gen4 meta), **balance**, **unweighted**. You can also paste an API id (e.g. `gen4NewNormal`, `attackTank`).",
+      };
+    }
     out.weightSettings = { enabled: true, profile: mapped };
   }
   if (ampRaw) {
@@ -341,7 +744,7 @@ function parseGovernorAdvancedSettingsFromFields(fields) {
     if (!Number.isFinite(amp) || amp < 1 || amp > 2) {
       return { ok: false, message: "Amplification factor must be a number between 1.0 and 2.0." };
     }
-    out.weightSettings = out.weightSettings || { enabled: true, profile: "earlyGameGrowth" };
+    out.weightSettings = out.weightSettings || { enabled: true, profile: "gen4NewNormal" };
     out.weightSettings.scalingAmplifier = amp;
   }
   if (troopRaw) {
@@ -642,12 +1045,68 @@ async function registerCommands() {
   }
 }
 
+/** Chat shortcuts (plain messages). Returns true if this message was handled. Skipped while governor gear chat wizard is active. */
+async function handlePublicApiShortcuts(message) {
+  if (message.author.bot) return false;
+  const sessionKey = getGovGearChatSessionKey(message);
+  if (govGearChatSessions.has(sessionKey)) return false;
+
+  const text = String(message.content || "").trim();
+  if (!text) return false;
+
+  // Kingdom age: פזמ 210 or פז"מ 210 (ASCII " or Hebrew gershayim U+05F4 between ז and מ)
+  const ageMatch = text.match(/^פז(?:מ|["\u05F4\u0022]מ)\s+(\d+)\s*$/u);
+  if (ageMatch) {
+    const kingdomId = parseInt(ageMatch[1], 10);
+    if (!Number.isFinite(kingdomId) || kingdomId <= 0) return false;
+    const res = await fetchKingdomTrackerById(kingdomId);
+    if (!res.ok) {
+      await message.reply(res.message || "Could not fetch kingdom tracker data right now.");
+      return true;
+    }
+    await message.reply(buildEmbedReplyPayload([buildKingdomAgePazamEmbed(res.data || {})]));
+    return true;
+  }
+
+  // KvK: message is only digits, 1–4 digits (e.g. 210). Player IDs use the 5–20 rule below.
+  if (/^\d+$/.test(text)) {
+    if (text.length >= 5 && text.length <= 20) {
+      const playerId = text;
+      const res = await fetchPlayerInfo(playerId);
+      if (!res.ok) {
+        await message.reply(res.message || "Could not fetch player info right now.");
+        return true;
+      }
+      const row = normalizePlayerApiRow(res.data || {}, playerId);
+      await message.reply({ embeds: [buildPlayerEmbed(row, playerId)] });
+      return true;
+    }
+    if (text.length >= 1 && text.length <= 4) {
+      const kingdomId = parseInt(text, 10);
+      if (!Number.isFinite(kingdomId) || kingdomId <= 0) return false;
+      const res = await fetchKvkMatchesForKingdom({ kingdomId });
+      if (!res.ok) {
+        await message.reply(res.message || "Could not fetch KvK matches right now.");
+        return true;
+      }
+      const rows = res.data || [];
+      if (!rows.length) {
+        await message.reply(`No KvK matches found for kingdom #${kingdomId}.`);
+        return true;
+      }
+      await message.reply({ embeds: buildKvkMatchesEmbeds(rows, { kingdomId }, null) });
+      return true;
+    }
+  }
+
+  return false;
+}
+
 async function handleKingshot(interaction) {
   const playerId = interaction.options.getString("player_id", true).trim();
   if (!/^\d{5,20}$/.test(playerId)) {
     await interaction.editReply({
       content: "Please provide a valid numeric player ID.",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -656,33 +1115,12 @@ async function handleKingshot(interaction) {
   if (!res.ok) {
     await interaction.editReply({
       content: res.message || "Could not fetch player info right now.",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const data = res.data || {};
-  const idValue = pickPlayerIdValue(data);
-  const name = data.name || data.nickname || data.nickName || "Unknown";
-  const kingdom = data.kingdomId ?? data.kingdom_id ?? data.serverId ?? data.server_id ?? "Unknown";
-  const level = data.level ?? data.castleLevel ?? data.castle_level ?? "Unknown";
-  const profileImage = data.avatar || data.avatarUrl || data.profileImage || data.image || null;
-
-  const embed = new EmbedBuilder()
-    .setTitle("Kingshot Player Lookup")
-    .setColor(0x00a6ff)
-    .addFields(
-      { name: "Player Name", value: String(name), inline: true },
-      { name: "Player ID", value: String(idValue ?? playerId), inline: true },
-      { name: "Kingdom", value: `#${String(kingdom)}`, inline: true },
-      { name: "Level", value: String(level), inline: true }
-    )
-    .setTimestamp(new Date());
-
-  if (brandImageUrl) embed.setThumbnail(brandImageUrl);
-  if (profileImage) embed.setImage(profileImage);
-
-  await interaction.editReply({ embeds: [embed] });
+  const row = normalizePlayerApiRow(res.data || {}, playerId);
+  await interaction.editReply({ embeds: [buildPlayerEmbed(row, playerId)] });
 }
 
 async function handleKvkMatches(interaction) {
@@ -690,7 +1128,6 @@ async function handleKvkMatches(interaction) {
   if (!Number.isFinite(kingdomId) || kingdomId <= 0) {
     await interaction.editReply({
       content: "Please provide a valid kingdom ID.",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -699,35 +1136,17 @@ async function handleKvkMatches(interaction) {
   if (!res.ok) {
     await interaction.editReply({
       content: res.message || "Could not fetch KvK matches right now.",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const rows = (res.data || []).slice(0, 20);
+  const rows = res.data || [];
   if (!rows.length) {
     await interaction.editReply({ content: `No KvK matches found for kingdom #${kingdomId}.` });
     return;
   }
 
-  const lines = rows.map((m) => {
-    const kvkId = m.kvk_id ?? "N/A";
-    const season = m.season_id ?? "N/A";
-    const a = m.kingdom_a ?? "?";
-    const b = m.kingdom_b ?? "?";
-    const status = m.status ?? "unknown";
-    return `• KvK ${kvkId} (S${season}): #${a} vs #${b} [${status}]`;
-  });
-
-  const embed = new EmbedBuilder()
-    .setTitle(`KvK Matches for #${kingdomId}`)
-    .setColor(0xff8f00)
-    .setDescription(lines.join("\n"))
-    .setFooter({ text: "Source: kingshot.net/api/kvk/matches" })
-    .setTimestamp(new Date());
-
-  if (brandImageUrl) embed.setThumbnail(brandImageUrl);
-  await interaction.editReply({ embeds: [embed] });
+  await interaction.editReply({ embeds: buildKvkMatchesEmbeds(rows, { kingdomId }, null) });
 }
 
 async function handleKingdomAge(interaction) {
@@ -735,7 +1154,6 @@ async function handleKingdomAge(interaction) {
   if (!Number.isFinite(kingdomId) || kingdomId <= 0) {
     await interaction.editReply({
       content: "Please provide a valid kingdom ID.",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -744,30 +1162,11 @@ async function handleKingdomAge(interaction) {
   if (!res.ok) {
     await interaction.editReply({
       content: res.message || "Could not fetch kingdom tracker data right now.",
-      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
-  const data = res.data || {};
-  const openUnix =
-    data.open_time ?? data.openTime ?? data.open_at ?? data.openAt ?? data.create_time ?? data.createTime;
-  const ageDays = data.age_days ?? data.ageDays ?? data.days ?? data.open_days ?? "Unknown";
-  const openTs = formatDiscordTimestampFromUnix(openUnix);
-
-  const embed = new EmbedBuilder()
-    .setTitle(`Kingdom #${kingdomId} Age`)
-    .setColor(0x7b1fa2)
-    .addFields(
-      { name: "Kingdom", value: `#${kingdomId}`, inline: true },
-      { name: "Age (days)", value: String(ageDays), inline: true },
-      { name: "Open Time", value: openTs || "Unknown", inline: false }
-    )
-    .setFooter({ text: "Source: kingshot.net/api/kingdom-tracker" })
-    .setTimestamp(new Date());
-
-  if (brandImageUrl) embed.setThumbnail(brandImageUrl);
-  await interaction.editReply({ embeds: [embed] });
+  await interaction.editReply(buildEmbedReplyPayload([buildKingdomAgePazamEmbed(res.data || {})]));
 }
 
 async function handleOptimizeGovGear(interaction) {
@@ -917,15 +1316,35 @@ function buildGovGearModalTwo(requestId, defaults = {}) {
   return modal;
 }
 
+const GOV_GEAR_API_PROFILE_TO_MODAL = {
+  earlyGameGrowth: "growth",
+  earlyGameCombat: "combat",
+  gen4NewNormal: "future",
+  futureProofed: "future",
+  balance: "balance",
+  unweighted: "unweighted",
+  combat: "combat",
+  attackTank: "attackTank",
+  extremeInfantry: "extremeInfantry",
+  extremeArchery: "extremeArchery",
+  extremeCavalry: "extremeCavalry",
+  userCustom: "userCustom",
+  custom: "custom",
+};
+
 function buildGovGearAdvancedModal(requestId, defaults = {}) {
   const modal = new ModalBuilder().setCustomId(`optimizegovgear:modaladvanced:${requestId}`).setTitle("Governor Gear Advanced (Optional)");
+  const savedProfileKey = defaults.weightSettings?.profile;
+  const weightProfileValue = savedProfileKey
+    ? GOV_GEAR_API_PROFILE_TO_MODAL[savedProfileKey] ?? savedProfileKey
+    : "future";
   const weightProfile = new TextInputBuilder()
     .setCustomId("weightProfile")
     .setLabel("Weight profile (growth/combat/future/unw)")
     .setStyle(TextInputStyle.Short)
     .setRequired(false)
-    .setPlaceholder("growth")
-    .setValue(defaults.weightSettings?.profile || "");
+    .setPlaceholder("future")
+    .setValue(weightProfileValue);
   const amplification = new TextInputBuilder()
     .setCustomId("amplification")
     .setLabel("Amplification factor (1.0-2.0)")
@@ -971,7 +1390,7 @@ function buildGovGearAdvancedModal(requestId, defaults = {}) {
 async function handleGovGearModalStep1(interaction, requestId) {
   const pending = govGearModalSessions.get(requestId);
   if (!pending || pending.userId !== interaction.user.id) {
-    await interaction.reply({ content: "This panel session expired. Type `Hero gear` again.", flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: "This panel session expired. Type `gov gear` again.", flags: MessageFlags.Ephemeral });
     return;
   }
   const fields = ["hat", "chain", "shirt", "pants", "ring"];
@@ -1002,7 +1421,7 @@ async function handleGovGearModalStep1(interaction, requestId) {
 async function handleGovGearModalStep2(interaction, requestId) {
   const pending = govGearModalSessions.get(requestId);
   if (!pending || pending.userId !== interaction.user.id) {
-    await interaction.reply({ content: "This panel session expired. Type `Hero gear` again.", flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: "This panel session expired. Type `gov gear` again.", flags: MessageFlags.Ephemeral });
     return;
   }
   const satin = Number(interaction.fields.getTextInputValue("satin"));
@@ -1072,7 +1491,7 @@ async function submitGovGearModalSession(interaction, requestId) {
   const pending = govGearModalSessions.get(requestId);
   if (!pending || pending.userId !== interaction.user.id) {
     await interaction.reply({
-      content: "This panel session expired. Type `Hero gear` again.",
+      content: "This panel session expired. Type `gov gear` again.",
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -1182,7 +1601,10 @@ client.once(Events.ClientReady, async (readyClient) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isAutocomplete()) {
-    if (interaction.commandName !== "optimizegovgear") return;
+    if (interaction.commandName !== "optimizegovgear") {
+      await interaction.respond([]);
+      return;
+    }
     const focused = interaction.options.getFocused(true);
     const q = String(focused.value || "").trim().toLowerCase().replace(/\s+/g, "");
     const choices = GOV_GEAR_LEVELS.filter((v) => v.toLowerCase().replace(/\s+/g, "").includes(q))
@@ -1203,7 +1625,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1222,7 +1644,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1261,7 +1683,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1281,7 +1703,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1298,7 +1720,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1313,7 +1735,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1332,7 +1754,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1378,7 +1800,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1405,7 +1827,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1413,7 +1835,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const slot = GOV_GEAR_SLOT_STEPS[slotIndex];
       if (!slot) {
-        await interaction.reply({ content: "Invalid panel state. Start again with `Hero gear`.", flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: "Invalid panel state. Start again with `gov gear`.", flags: MessageFlags.Ephemeral });
         return;
       }
       pending.data[slot.key] = interaction.values[0];
@@ -1447,14 +1869,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const pending = govGearModalSessions.get(requestId);
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
-          content: "This panel session expired. Type `Hero gear` again.",
+          content: "This panel session expired. Type `gov gear` again.",
           flags: MessageFlags.Ephemeral,
         });
         return;
       }
       const slot = GOV_GEAR_SLOT_STEPS[slotIndex];
       if (!slot) {
-        await interaction.reply({ content: "Invalid panel state. Start again with `Hero gear`.", flags: MessageFlags.Ephemeral });
+        await interaction.reply({ content: "Invalid panel state. Start again with `gov gear`.", flags: MessageFlags.Ephemeral });
         return;
       }
       pending.data[slot.key] = interaction.values[0];
@@ -1527,7 +1949,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (!["kingshot", "kvkmatches", "kingdomage", "optimizegovgear"].includes(interaction.commandName)) return;
 
-  await interaction.deferReply({ flags: interaction.commandName === "optimizegovgear" ? MessageFlags.Ephemeral : undefined });
+  const isGovGearSlash = interaction.commandName === "optimizegovgear";
+  /** Public defer for Kingshot lookups (embeds + brand file); ephemeral only for governor gear wizard. */
+  await interaction.deferReply(isGovGearSlash ? { flags: MessageFlags.Ephemeral } : {});
 
   try {
     if (interaction.commandName === "kingshot") {
@@ -1559,10 +1983,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   try {
+    if (message.guild && enableNicknameChannel && message.channelId === nicknameChannelId) {
+      await handleNicknameChannelMessage(message);
+      return;
+    }
+    if (await handlePublicApiShortcuts(message)) return;
     await handleGovGearChatMessage(message);
   } catch (e) {
-    console.error("Gov gear chat wizard error:", e);
-    await message.reply("Unexpected error while processing the Hero gear wizard.");
+    console.error("Message handler error:", e);
+    try {
+      await message.reply("Unexpected error while processing your message.");
+    } catch (_) {
+      /* ignore */
+    }
   }
 });
 
