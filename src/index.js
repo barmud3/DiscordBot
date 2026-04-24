@@ -211,6 +211,16 @@ const GOV_GEAR_SLOT_STEPS = [
   { key: "ring", label: "Ring (arch1)" },
   { key: "baton", label: "Baton (arch2)" },
 ];
+const GOV_GEAR_SLOT_COUNT = GOV_GEAR_SLOT_STEPS.length;
+
+function govGearSlotStepLine(slotIndex) {
+  const slot = GOV_GEAR_SLOT_STEPS[slotIndex];
+  const label = slot ? slot.label : "Gear";
+  const step = Number.isFinite(slotIndex)
+    ? Math.min(Math.max(Math.floor(slotIndex) + 1, 1), GOV_GEAR_SLOT_COUNT)
+    : 1;
+  return `**Step ${step}/${GOV_GEAR_SLOT_COUNT}** — ${label}`;
+}
 
 function formatDiscordTimestampFromUnix(unixSeconds) {
   const n = Number(unixSeconds);
@@ -373,19 +383,15 @@ function buildSavedGearReviewView(requestId, data) {
     `**Resources (next step):** Satin \`${satin}\` · Gilded Threads \`${threads}\` · Artisan's Vision \`${vision}\``;
 
   const shortLabel = (full) => full.replace(/\s*\([^)]+\)\s*$/, "");
-  const row1 = new ActionRowBuilder().addComponents(
-    ...GOV_GEAR_SLOT_STEPS.slice(0, 5).map((s, i) =>
-      new ButtonBuilder()
-        .setCustomId(`optimizegovgear:editslot:${requestId}:${i}`)
-        .setLabel(shortLabel(s.label).slice(0, 80))
-        .setStyle(ButtonStyle.Secondary)
-    )
-  );
-  const row2 = new ActionRowBuilder().addComponents(
+  const gearButton = (i) =>
     new ButtonBuilder()
-      .setCustomId(`optimizegovgear:editslot:${requestId}:5`)
-      .setLabel(shortLabel(GOV_GEAR_SLOT_STEPS[5].label).slice(0, 80))
-      .setStyle(ButtonStyle.Secondary),
+      .setCustomId(`optimizegovgear:editslot:${requestId}:${i}`)
+      .setLabel(shortLabel(GOV_GEAR_SLOT_STEPS[i].label).slice(0, 80))
+      .setStyle(ButtonStyle.Secondary);
+  // Discord max 5 buttons/row — 6 slots need two rows (here 3+3 so Baton sits with other gear, not with actions).
+  const rowGear1 = new ActionRowBuilder().addComponents(gearButton(0), gearButton(1), gearButton(2));
+  const rowGear2 = new ActionRowBuilder().addComponents(gearButton(3), gearButton(4), gearButton(5));
+  const rowActions = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`optimizegovgear:openmodal2:${requestId}`)
       .setLabel("Continue to resources")
@@ -395,7 +401,7 @@ function buildSavedGearReviewView(requestId, data) {
       .setLabel("Clear gear & start over")
       .setStyle(ButtonStyle.Danger)
   );
-  return { content, components: [row1, row2] };
+  return { content, components: [rowGear1, rowGear2, rowActions] };
 }
 
 function buildGovGearSelectView(requestId, slotIndex, page) {
@@ -430,8 +436,8 @@ function buildGovGearSelectView(requestId, slotIndex, page) {
 
   return {
     content:
-      `Select **${slot.label}**\n` +
-      `Page ${safePage + 1}/${totalPages} (use **Next** for higher tiers like Gold T3 / Red)`,
+      `${govGearSlotStepLine(slotIndex)}\n` +
+      `Page **${safePage + 1}/${totalPages}** of tier list (use **Next** for higher tiers like Gold T3 / Red).`,
     components: [new ActionRowBuilder().addComponents(select), new ActionRowBuilder().addComponents(prevBtn, nextBtn, cancelBtn)],
   };
 }
@@ -460,7 +466,7 @@ function clampGovGearEditWindowStart(rawStart) {
   return Math.max(0, Math.min(start, maxStart));
 }
 
-/** Same as wizard select, but updates one slot from saved-gear review (customIds differ). `windowStart` = index into GOV_GEAR_LEVELS for the first row. */
+/** Same as wizard select, but updates one slot from saved-gear review (customIds differ). `windowStart` = index into GOV_GEAR_LEVELS for the first row. Options stay in real tier order; `setDefault` marks your save (Discord may scroll to it). */
 function buildGovGearEditSelectView(requestId, slotIndex, windowStart, savedRaw) {
   const slot = GOV_GEAR_SLOT_STEPS[slotIndex];
   const start = clampGovGearEditWindowStart(windowStart);
@@ -502,11 +508,40 @@ function buildGovGearEditSelectView(requestId, slotIndex, windowStart, savedRaw)
 
   return {
     content:
-      `Edit **${slot.label}**\n` +
+      `${govGearSlotStepLine(slotIndex)} · edit\n` +
       (savedLine || "") +
-      `Tiers **${start + 1}–${end}** of **${len}** (saved tier **centered** in this window when possible, so lower and higher tiers both appear). **Prev** / **Next** for more.`,
+      `Tiers **${start + 1}–${end}** of **${len}** (progression order; window centered on your save when possible). Your save stays **selected**. **Prev** / **Next** for more tiers.`,
     components: [new ActionRowBuilder().addComponents(select), new ActionRowBuilder().addComponents(prevBtn, nextBtn, backBtn)],
   };
+}
+
+function formatOptimizerStatBonusPercent(n) {
+  if (!Number.isFinite(n)) return "0";
+  const rounded = Math.round(n * 100) / 100;
+  if (Number.isInteger(rounded)) return String(rounded);
+  const s = rounded.toFixed(2);
+  return s.replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatOptimizerPower(n) {
+  if (!Number.isFinite(n)) return "0";
+  return new Intl.NumberFormat("en-US").format(Math.round(n));
+}
+
+/** Matches kingshotoptimizer API `result`: recommendations length, totalStatGain, totalPowerGain. */
+function buildGovernorGearOptimizerSummaryLine(data) {
+  if (!data || typeof data !== "object") return "";
+  const rec = Array.isArray(data.recommendations) ? data.recommendations : [];
+  const upgrades = rec.length;
+  const stat = Number(data.totalStatGain);
+  const pow = Number(data.totalPowerGain);
+  return `**${upgrades}** upgrade${upgrades === 1 ? "" : "s"} · **+${formatOptimizerStatBonusPercent(stat)}%** stat bonus · **+${formatOptimizerPower(pow)}** power`;
+}
+
+function buildGovernorGearOptimizerReplyMarkdown(data) {
+  const summary = buildGovernorGearOptimizerSummaryLine(data);
+  const detail = buildOptimizerResultText(data);
+  return `Optimizer recommendation:\n${summary}\n\n${detail}\n\nSource: <https://kingshotoptimizer.com/governor-gear/optimize>`;
 }
 
 function buildOptimizerResultText(data) {
@@ -823,10 +858,7 @@ async function handleGovGearSubmitButton(interaction) {
     return;
   }
 
-  const recommendationText = buildOptimizerResultText(result.data);
-  await interaction.editReply(
-    `Optimizer recommendation:\n${recommendationText}\n\nSource: <https://kingshotoptimizer.com/governor-gear/optimize>`
-  );
+  await interaction.editReply(buildGovernorGearOptimizerReplyMarkdown(result.data));
 }
 
 function buildGovGearModalOne(requestId, defaults = {}) {
@@ -961,7 +993,7 @@ async function handleGovGearModalStep1(interaction, requestId) {
     .setStyle(ButtonStyle.Primary);
   const row = new ActionRowBuilder().addComponents(continueBtn);
   await interaction.reply({
-    content: "Panel 1 saved. Click to open Panel 2 (Baton + resources).",
+    content: "**Panel 1/2** — Saved.\n**Panel 2/2** — Click below to open resources.",
     components: [row],
     flags: MessageFlags.Ephemeral,
   });
@@ -1006,7 +1038,7 @@ async function handleGovGearModalStep2(interaction, requestId) {
     .setLabel("Cancel")
     .setStyle(ButtonStyle.Danger);
   await interaction.reply({
-    content: "Resources saved. Submit now or open optional advanced settings.",
+    content: "**Panel 2/2** — Resources saved. Submit now or open optional advanced settings.",
     components: [new ActionRowBuilder().addComponents(submitBtn, advancedBtn, cancelBtn)],
     flags: MessageFlags.Ephemeral,
   });
@@ -1033,10 +1065,7 @@ async function finishGovGearChatWizard(message, sessionKey, session) {
     return;
   }
 
-  const recommendationText = buildOptimizerResultText(result.data);
-  await message.reply(
-    `Optimizer recommendation:\n${recommendationText}\n\nSource: <https://kingshotoptimizer.com/governor-gear/optimize>`
-  );
+  await message.reply(buildGovernorGearOptimizerReplyMarkdown(result.data));
 }
 
 async function submitGovGearModalSession(interaction, requestId) {
@@ -1058,10 +1087,7 @@ async function submitGovGearModalSession(interaction, requestId) {
     );
     return;
   }
-  const recommendationText = buildOptimizerResultText(result.data);
-  await interaction.editReply(
-    `Optimizer recommendation:\n${recommendationText}\n\nSource: <https://kingshotoptimizer.com/governor-gear/optimize>`
-  );
+  await interaction.editReply(buildGovernorGearOptimizerReplyMarkdown(result.data));
 }
 
 async function handleGovGearChatMessage(message) {
@@ -1075,28 +1101,21 @@ async function handleGovGearChatMessage(message) {
     const requestId = `${message.author.id}-${Date.now()}`;
     const lastMemory = getUserGovGearMemory(message.author.id) || {};
     govGearModalSessions.set(requestId, { userId: message.author.id, data: { ...lastMemory }, createdAt: Date.now() });
+    if (hasCompleteGearData(lastMemory)) {
+      const review = buildSavedGearReviewView(requestId, govGearModalSessions.get(requestId).data);
+      await message.reply({
+        content: review.content,
+        components: review.components,
+      });
+      return;
+    }
     const openButton = new ButtonBuilder()
       .setCustomId(`optimizegovgear:startselect:${requestId}`)
       .setLabel("Open Governor Gear Panel")
       .setStyle(ButtonStyle.Primary);
-    const buttons = [openButton];
-    if (hasCompleteGearData(lastMemory)) {
-      buttons.push(
-        new ButtonBuilder()
-          .setCustomId(`optimizegovgear:reviewsaved:${requestId}`)
-          .setLabel("Review saved gear")
-          .setStyle(ButtonStyle.Secondary)
-      );
-    }
-    const row = new ActionRowBuilder().addComponents(...buttons);
+    const row = new ActionRowBuilder().addComponents(openButton);
     await message.reply({
-      content:
-        "Governor Gear panel is ready.\n" +
-        "• **Open Governor Gear Panel** — pick all 6 slots (or start from scratch).\n" +
-        (hasCompleteGearData(lastMemory)
-          ? "• **Review saved gear** — see your last 6 pieces, change any slot, then resources.\n"
-          : "") +
-        "You will enter resources in the next step.",
+      content: "Governor Gear — use the button to start **Step 1/6** (Hat) and pick all six slots, then resources.",
       components: [row],
     });
     return;
@@ -1185,15 +1204,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!pending || pending.userId !== interaction.user.id) {
         await interaction.reply({
           content: "This panel session expired. Type `Hero gear` again.",
-          flags: MessageFlags.Ephemeral,
-        });
-        return;
-      }
-      if (hasCompleteGearData(pending.data)) {
-        const review = buildSavedGearReviewView(requestId, pending.data);
-        await interaction.reply({
-          content: review.content,
-          components: review.components,
           flags: MessageFlags.Ephemeral,
         });
         return;
@@ -1425,7 +1435,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setLabel("Cancel")
         .setStyle(ButtonStyle.Danger);
       await interaction.update({
-        content: "All 6 gear slots selected. Click below to enter resources.",
+        content: `${govGearSlotStepLine(5)} ✓ All gear slots filled.\nClick below for **panel 2/2** (resources).`,
         components: [new ActionRowBuilder().addComponents(continueBtn, cancelBtn)],
       });
       return;
