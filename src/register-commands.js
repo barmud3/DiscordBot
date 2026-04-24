@@ -1,8 +1,3 @@
-/**
- * Run once after setting DISCORD_TOKEN, DISCORD_CLIENT_ID, and optionally GUILD_ID in .env
- *   npm run register-commands
- * The main bot also registers commands on startup; this script is optional for manual refresh.
- */
 require("dotenv").config();
 const { REST, Routes, SlashCommandBuilder } = require("discord.js");
 
@@ -37,84 +32,6 @@ const commands = [
         .setRequired(true)
     )
     .toJSON(),
-  new SlashCommandBuilder()
-    .setName("govgearopt")
-    .setDescription("Optimize governor gear (manual resources + gear templates)")
-    .addAttachmentOption((o) =>
-      o
-        .setName("gear_image")
-        .setDescription("Governor profile screenshot (gear matched vs your Kingshot-image reference set)")
-        .setRequired(true)
-    )
-    .addIntegerOption((o) =>
-      o.setName("satin").setDescription("Available Satin (optional manual override)").setRequired(false)
-    )
-    .addIntegerOption((o) =>
-      o
-        .setName("gilded_threads")
-        .setDescription("Available Gilded Threads (optional manual override)")
-        .setRequired(false)
-    )
-    .addIntegerOption((o) =>
-      o
-        .setName("artisans_vision")
-        .setDescription("Available Artisan's Vision (optional manual override)")
-        .setRequired(false)
-    )
-    .addIntegerOption((o) =>
-      o.setName("infantry1").setDescription("Manual override for Infantry Gear Piece 1 level")
-    )
-    .addStringOption((o) =>
-      o
-        .setName("infantry1_label")
-        .setDescription("Manual override label (e.g., Red T2 0* or Blue 1*)")
-    )
-    .addIntegerOption((o) =>
-      o.setName("infantry2").setDescription("Manual override for Infantry Gear Piece 2 level")
-    )
-    .addStringOption((o) =>
-      o
-        .setName("infantry2_label")
-        .setDescription("Manual override label (e.g., Red T2 0* or Blue 1*)")
-    )
-    .addIntegerOption((o) =>
-      o.setName("cavalry1").setDescription("Manual override for Cavalry Gear Piece 1 level")
-    )
-    .addStringOption((o) =>
-      o
-        .setName("cavalry1_label")
-        .setDescription("Manual override label (e.g., Red T2 0* or Blue 1*)")
-    )
-    .addIntegerOption((o) =>
-      o.setName("cavalry2").setDescription("Manual override for Cavalry Gear Piece 2 level")
-    )
-    .addStringOption((o) =>
-      o
-        .setName("cavalry2_label")
-        .setDescription("Manual override label (e.g., Red T2 0* or Blue 1*)")
-    )
-    .addIntegerOption((o) =>
-      o.setName("archery1").setDescription("Manual override for Archery Gear Piece 1 level")
-    )
-    .addStringOption((o) =>
-      o
-        .setName("archery1_label")
-        .setDescription("Manual override label (e.g., Red T2 0* or Blue 1*)")
-    )
-    .addIntegerOption((o) =>
-      o.setName("archery2").setDescription("Manual override for Archery Gear Piece 2 level")
-    )
-    .addStringOption((o) =>
-      o
-        .setName("archery2_label")
-        .setDescription("Manual override label (e.g., Red T2 0* or Blue 1*)")
-    )
-    .addBooleanOption((o) =>
-      o
-        .setName("show_crops")
-        .setDescription("Attach a debug image of the 6 slot crops (detected vs full-frame bounds)")
-    )
-    .toJSON(),
 ];
 
 async function main() {
@@ -128,11 +45,8 @@ async function main() {
   }
 
   const rest = new REST({ version: "10" }).setToken(token);
-
   if (guildId) {
-    await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
-      body: commands,
-    });
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
     console.log(`Registered guild commands for guild ${guildId}.`);
   } else {
     await rest.put(Routes.applicationCommands(clientId), { body: commands });

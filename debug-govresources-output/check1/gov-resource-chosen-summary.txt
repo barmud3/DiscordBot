@@ -1,5 +1,0 @@
-Chosen resources (cell + icon score + OCR number)
-
-Satin: r3 c1 | score 0.637 | OCR "1,058,170" -> 1,058,170
-Gilded Threads: r6 c3 | score 0.627 | OCR "99" -> 99
-Artisan's Vision: r4 c4 | score 0.658 | OCR "32" -> 32
