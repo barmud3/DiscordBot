@@ -1,0 +1,6 @@
+Hat(calv1) : Green
+Chain(calv2) : Green
+Shirt(inf1) : Green 1*
+pants(inf2) : Green
+ring(arch1) : Green 1*
+baton(arch2) : Green 1*

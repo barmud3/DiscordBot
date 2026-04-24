@@ -1,0 +1,5 @@
+Chosen resources (cell + icon score + OCR number)
+
+Satin: r1 c4 | score 0.639 | OCR "" -> ocr skipped
+Gilded Threads: r2 c3 | score 0.599 | OCR "" -> ocr skipped
+Artisan's Vision: r2 c4 | score 0.640 | OCR "" -> ocr skipped

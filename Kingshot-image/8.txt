@@ -1,0 +1,6 @@
+Hat(calv1) : Purple T1 3*
+Chain(calv2) : Gold
+Shirt(inf1) : Gold T1 2*
+pants(inf2) : Gold T1
+ring(arch1) : Gold T1
+baton(arch2) : Gold T1

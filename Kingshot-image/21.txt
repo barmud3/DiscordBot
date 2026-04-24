@@ -1,0 +1,6 @@
+Hat(calv1) : Blue 1*
+Chain(calv2) : Blue 1*
+Shirt(inf1) : Purple 
+pants(inf2) : Purple
+ring(arch1) : Purple
+baton(arch2) : Purple

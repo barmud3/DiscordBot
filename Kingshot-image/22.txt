@@ -1,0 +1,6 @@
+Hat(calv1) : Red T4
+Chain(calv2) : Red T4
+Shirt(inf1) : Red T5 3*
+pants(inf2) : Red T5 3*
+ring(arch1) : Red T4
+baton(arch2) : Red T4
