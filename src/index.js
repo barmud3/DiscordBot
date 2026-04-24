@@ -45,6 +45,29 @@ const nicknameDeleteMessage =
 /** @type {Map<string, number>} */
 const nicknameCooldownUntil = new Map();
 
+/** If set, /optimizegovgear, its autocomplete, "gov gear" chat triggers, and all gear panel buttons/selects/modals only work in this channel. */
+const govGearChannelId = (process.env.GOV_GEAR_CHANNEL_ID || "").trim();
+const restrictGovGearToChannel = Boolean(govGearChannelId);
+
+function isGovGearAllowedChannel(channelId) {
+  if (!restrictGovGearToChannel) return true;
+  return String(channelId || "") === govGearChannelId;
+}
+
+/** @param {import("discord.js").BaseInteraction} interaction */
+async function replyGovGearWrongChannel(interaction) {
+  const content = `Governor gear is only available in <#${govGearChannelId}>.`;
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
+    } else {
+      await interaction.reply({ content, flags: MessageFlags.Ephemeral });
+    }
+  } catch (_) {
+    /* ignore */
+  }
+}
+
 if (!token || !clientId) {
   console.error("Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in .env");
   process.exit(1);
@@ -1511,6 +1534,7 @@ async function submitGovGearModalSession(interaction, requestId) {
 
 async function handleGovGearChatMessage(message) {
   if (!message.content) return;
+  if (!isGovGearAllowedChannel(message.channelId)) return;
   const sessionKey = getGovGearChatSessionKey(message);
   const existing = govGearChatSessions.get(sessionKey);
 
@@ -1605,12 +1629,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.respond([]);
       return;
     }
+    if (!isGovGearAllowedChannel(interaction.channelId)) {
+      await interaction.respond([]);
+      return;
+    }
     const focused = interaction.options.getFocused(true);
     const q = String(focused.value || "").trim().toLowerCase().replace(/\s+/g, "");
     const choices = GOV_GEAR_LEVELS.filter((v) => v.toLowerCase().replace(/\s+/g, "").includes(q))
       .slice(0, 25)
       .map((v) => ({ name: v, value: v }));
     await interaction.respond(choices);
+    return;
+  }
+
+  const isOptimizeGovGearComponent =
+    (interaction.isButton() && interaction.customId.startsWith("optimizegovgear:")) ||
+    (interaction.isStringSelectMenu() && interaction.customId.startsWith("optimizegovgear:")) ||
+    (interaction.isModalSubmit() && interaction.customId.startsWith("optimizegovgear:"));
+  if (isOptimizeGovGearComponent && !isGovGearAllowedChannel(interaction.channelId)) {
+    await replyGovGearWrongChannel(interaction);
     return;
   }
 
@@ -1950,6 +1987,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!["kingshot", "kvkmatches", "kingdomage", "optimizegovgear"].includes(interaction.commandName)) return;
 
   const isGovGearSlash = interaction.commandName === "optimizegovgear";
+  if (isGovGearSlash && !isGovGearAllowedChannel(interaction.channelId)) {
+    await interaction.reply({
+      content: `Governor gear is only available in <#${govGearChannelId}>.`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
   /** Public defer for Kingshot lookups (embeds + brand file); ephemeral only for governor gear wizard. */
   await interaction.deferReply(isGovGearSlash ? { flags: MessageFlags.Ephemeral } : {});
 
