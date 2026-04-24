@@ -293,9 +293,185 @@ async function fetchKingdomTrackerById(kingdomId) {
   return { ok: true, data: kingdom };
 }
 
+/**
+ * @param {{
+ *   satin: number,
+ *   gildedThreads: number,
+ *   artisansVision: number,
+ *   hat: string,
+ *   chain: string,
+ *   shirt: string,
+ *   pants: string,
+ *   ring: string,
+ *   baton: string
+ * }} input
+ * @returns {Promise<{ ok: true, data: any } | { ok: false, code: string, message: string }>}
+ */
+async function fetchGovernorGearOptimization(input) {
+  const endpoint = "https://api.kingshotoptimizer.com/governor-gear";
+
+  const toStep = (level) => {
+    const levels = [
+      "Green",
+      "Green⭐",
+      "Blue",
+      "Blue⭐",
+      "Blue⭐⭐",
+      "Blue⭐⭐⭐",
+      "Purple",
+      "Purple⭐",
+      "Purple⭐⭐",
+      "Purple⭐⭐⭐",
+      "Purple T1",
+      "Purple T1⭐",
+      "Purple T1⭐⭐",
+      "Purple T1⭐⭐⭐",
+      "Gold",
+      "Gold⭐",
+      "Gold⭐⭐",
+      "Gold⭐⭐⭐",
+      "Gold T1",
+      "Gold T1⭐",
+      "Gold T1⭐⭐",
+      "Gold T1⭐⭐⭐",
+      "Gold T2",
+      "Gold T2⭐",
+      "Gold T2⭐⭐",
+      "Gold T2⭐⭐⭐",
+      "Gold T3",
+      "Gold T3⭐",
+      "Gold T3⭐⭐",
+      "Gold T3⭐⭐⭐",
+      "Red",
+      "Red⭐",
+      "Red⭐⭐",
+      "Red⭐⭐⭐",
+      "Red T1",
+      "Red T1⭐",
+      "Red T1⭐⭐",
+      "Red T1⭐⭐⭐",
+      "Red T2",
+      "Red T2⭐",
+      "Red T2⭐⭐",
+      "Red T2⭐⭐⭐",
+      "Red T3",
+      "Red T3⭐",
+      "Red T3⭐⭐",
+      "Red T3⭐⭐⭐",
+      "Red T4",
+      "Red T4⭐",
+      "Red T4⭐⭐",
+      "Red T4⭐⭐⭐",
+      "Red T5",
+      "Red T5⭐",
+      "Red T5⭐⭐",
+      "Red T5⭐⭐⭐",
+      "Red T6",
+      "Red T6⭐",
+      "Red T6⭐⭐",
+      "Red T6⭐⭐⭐",
+    ];
+    const compact = String(level || "")
+      .toLowerCase()
+      .replace(/[🌟⭐]/g, "*")
+      .replace(/\s+/g, "");
+    for (let i = 0; i < levels.length; i += 1) {
+      const candidate = levels[i].toLowerCase().replace(/[🌟⭐]/g, "*").replace(/\s+/g, "");
+      if (candidate === compact) return i;
+    }
+    return -1;
+  };
+
+  const payload = {
+    resources: {
+      satin: Number(input.satin || 0),
+      gildedThreads: Number(input.gildedThreads || 0),
+      artisansVision: Number(input.artisansVision || 0),
+    },
+    pieceLevels: {
+      infantry_gear_1: toStep(input.shirt),
+      infantry_gear_2: toStep(input.pants),
+      cavalry_gear_1: toStep(input.hat),
+      cavalry_gear_2: toStep(input.chain),
+      archery_gear_1: toStep(input.ring),
+      archery_gear_2: toStep(input.baton),
+    },
+    troopTypeFilter: "all",
+    optimizationMode: "optimize-stats",
+    maxUpgrades: 100,
+  };
+
+  if (input.troopTypeFilter && ["all", "infantry", "cavalry", "archery"].includes(input.troopTypeFilter)) {
+    payload.troopTypeFilter = input.troopTypeFilter;
+  }
+  if (input.optimizationMode && ["optimize-stats", "optimize-events"].includes(input.optimizationMode)) {
+    payload.optimizationMode = input.optimizationMode;
+  }
+  if (Number.isFinite(Number(input.maxUpgrades)) && Number(input.maxUpgrades) > 0) {
+    payload.maxUpgrades = Math.floor(Number(input.maxUpgrades));
+  }
+  if (
+    input.weightSettings &&
+    input.weightSettings.enabled &&
+    ["earlyGameGrowth", "earlyGameCombat", "futureProofed", "unweighted"].includes(input.weightSettings.profile)
+  ) {
+    payload.weightSettings = {
+      enabled: true,
+      profile: input.weightSettings.profile,
+      scalingAmplifier: Number.isFinite(Number(input.weightSettings.scalingAmplifier))
+        ? Number(input.weightSettings.scalingAmplifier)
+        : 1.25,
+    };
+  }
+
+  let res;
+  try {
+    res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (_) {
+    return {
+      ok: false,
+      code: "OPTIMIZER_FAILED",
+      message: "Could not reach optimizer API.",
+    };
+  }
+
+  let body = null;
+  try {
+    body = await res.json();
+  } catch (_) {
+    body = null;
+  }
+
+  if (res.ok && body && body.success) {
+    return { ok: true, data: body.result ?? {} };
+  }
+
+  let lastError = `Optimizer API returned status ${res.status}.`;
+  if (body && typeof body.message === "string" && body.message.trim()) {
+    lastError = body.message;
+  } else if (body && typeof body.error === "string" && body.error.trim()) {
+    lastError = body.error;
+  }
+  if (lastError.includes("heroes.") || lastError.includes("resources.xpParts10")) {
+    return {
+      ok: false,
+      code: "GOV_GEAR_OPTIMIZER_UNAVAILABLE",
+      message:
+        "Governor Gear optimizer service is currently unavailable from the bot. Please use the optimizer page directly for now.",
+    };
+  }
+
+  return { ok: false, code: "OPTIMIZER_FAILED", message: lastError };
+}
+
 module.exports = {
   fetchPlayerInfo,
   fetchKvkMatches,
   fetchKvkMatchesForKingdom,
   fetchKingdomTrackerById,
+  fetchGovernorGearOptimization,
 };

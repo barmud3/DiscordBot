@@ -1,0 +1,12 @@
+{
+  "slot_centers": {
+    "top_left": [0.150, 0.255],
+    "middle_left": [0.105, 0.375],
+    "bottom_left": [0.150, 0.495],
+    "top_right": [0.850, 0.255],
+    "middle_right": [0.895, 0.375],
+    "bottom_right": [0.850, 0.495]
+  },
+  "slot_w_ratio": 0.19,
+  "slot_h_ratio": 0.125
+}

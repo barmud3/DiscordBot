@@ -32,6 +32,65 @@ const commands = [
         .setRequired(true)
     )
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("optimizegovgear")
+    .setDescription("Prepare governor gear optimization request")
+    .addIntegerOption((o) =>
+      o.setName("satin").setDescription("Available Satin").setRequired(true).setMinValue(0)
+    )
+    .addIntegerOption((o) =>
+      o.setName("gilded_threads").setDescription("Available Gilded Threads").setRequired(true).setMinValue(0)
+    )
+    .addIntegerOption((o) =>
+      o
+        .setName("artisans_vision")
+        .setDescription("Available Artisan's Vision")
+        .setRequired(true)
+        .setMinValue(0)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("hat")
+        .setDescription("Hat (cav1) - type level text")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("chain")
+        .setDescription("Chain (cav2) - type level text")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("shirt")
+        .setDescription("Shirt (inf1) - type level text")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("pants")
+        .setDescription("Pants (inf2) - type level text")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("ring")
+        .setDescription("Ring (arch1) - type level text")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addStringOption((o) =>
+      o
+        .setName("baton")
+        .setDescription("Baton (arch2) - type level text")
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .toJSON(),
 ];
 
 async function main() {
