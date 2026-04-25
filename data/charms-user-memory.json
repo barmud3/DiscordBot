@@ -1,0 +1,27 @@
+{
+  "749581730364522576": {
+    "updatedAt": "2026-04-25T19:36:30.767Z",
+    "data": {
+      "charmGuides": 1200,
+      "charmDesigns": 1300,
+      "cavalry_gear_1_charm_1": 3,
+      "cavalry_gear_1_charm_2": 3,
+      "cavalry_gear_1_charm_3": 5,
+      "cavalry_gear_2_charm_1": 3,
+      "cavalry_gear_2_charm_2": 3,
+      "cavalry_gear_2_charm_3": 3,
+      "infantry_gear_1_charm_1": 3,
+      "infantry_gear_1_charm_2": 3,
+      "infantry_gear_1_charm_3": 4,
+      "infantry_gear_2_charm_1": 4,
+      "infantry_gear_2_charm_2": 3,
+      "infantry_gear_2_charm_3": 3,
+      "archery_gear_1_charm_1": 3,
+      "archery_gear_1_charm_2": 2,
+      "archery_gear_1_charm_3": 3,
+      "archery_gear_2_charm_1": 3,
+      "archery_gear_2_charm_2": 3,
+      "archery_gear_2_charm_3": 3
+    }
+  }
+}

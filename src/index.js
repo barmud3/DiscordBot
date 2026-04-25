@@ -52,25 +52,37 @@ const CHARM_SLASH_LEVEL_LABELS = [
   "Archery gear 2 — charm 3",
 ];
 
-const CHARMS_TOTAL_CHAT_STEPS = 2 + CHARM_LEVEL_API_KEYS.length;
-const CHARMS_CHAT_STEPS = [
+const CHARMS_CLOTHS = [
   {
-    key: "charmGuides",
-    kind: "resource",
-    prompt: `**Step 1/${CHARMS_TOTAL_CHAT_STEPS}** — Materials\nHow many **Charm Guides** do you have? (whole number **≥ 0**)`,
+    key: "cloth1",
+    label: "Crown (calv1)",
+    charmKeys: ["cavalry_gear_1_charm_1", "cavalry_gear_1_charm_2", "cavalry_gear_1_charm_3"],
   },
   {
-    key: "charmDesigns",
-    kind: "resource",
-    prompt: `**Step 2/${CHARMS_TOTAL_CHAT_STEPS}** — Materials\nHow many **Charm Designs** do you have? (whole number **≥ 0**)`,
+    key: "cloth2",
+    label: "Pendant (calv2)",
+    charmKeys: ["cavalry_gear_2_charm_1", "cavalry_gear_2_charm_2", "cavalry_gear_2_charm_3"],
   },
-  ...CHARM_LEVEL_API_KEYS.map((apiKey, i) => ({
-    key: apiKey,
-    kind: "charmLevel",
-    prompt: `**Step ${i + 3}/${CHARMS_TOTAL_CHAT_STEPS}** — **${
-      CHARM_SLASH_LEVEL_LABELS[i] || apiKey
-    }**\nCurrent level **0–22** (0 = not started). Reply with **one number** only.`,
-  })),
+  {
+    key: "cloth3",
+    label: "Shirt (inf1)",
+    charmKeys: ["infantry_gear_1_charm_1", "infantry_gear_1_charm_2", "infantry_gear_1_charm_3"],
+  },
+  {
+    key: "cloth4",
+    label: "Pants (inf2)",
+    charmKeys: ["infantry_gear_2_charm_1", "infantry_gear_2_charm_2", "infantry_gear_2_charm_3"],
+  },
+  {
+    key: "cloth5",
+    label: "Ring (arch1)",
+    charmKeys: ["archery_gear_1_charm_1", "archery_gear_1_charm_2", "archery_gear_1_charm_3"],
+  },
+  {
+    key: "cloth6",
+    label: "Baton (arch2)",
+    charmKeys: ["archery_gear_2_charm_1", "archery_gear_2_charm_2", "archery_gear_2_charm_3"],
+  },
 ];
 
 const token = process.env.DISCORD_TOKEN;
@@ -334,9 +346,10 @@ const GOV_GEAR_LEVELS = [
 ];
 const pendingGovGearSubmissions = new Map();
 const govGearChatSessions = new Map();
-const charmsChatSessions = new Map();
+const charmsPanelSessions = new Map();
 const govGearModalSessions = new Map();
 const GOV_GEAR_MEMORY_FILE = path.resolve(__dirname, "..", "data", "govgear-user-memory.json");
+const CHARMS_MEMORY_FILE = path.resolve(__dirname, "..", "data", "charms-user-memory.json");
 const GOV_GEAR_CHAT_TRIGGER_PHRASES = new Set([
   "gov gear",
   "government gear",
@@ -772,6 +785,23 @@ function getGovGearChatSessionKey(message) {
   return `${message.guildId || "dm"}:${message.channelId}:${message.author.id}`;
 }
 
+function hasActiveCharmsPanelSessionForMessage(message) {
+  for (const session of charmsPanelSessions.values()) {
+    if (session.userId === message.author.id && session.channelId === message.channelId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function clearCharmsPanelSessionsForMessage(message) {
+  for (const [requestId, session] of charmsPanelSessions.entries()) {
+    if (session.userId === message.author.id && session.channelId === message.channelId) {
+      charmsPanelSessions.delete(requestId);
+    }
+  }
+}
+
 function loadGovGearMemoryStore() {
   try {
     if (!fs.existsSync(GOV_GEAR_MEMORY_FILE)) return {};
@@ -807,6 +837,43 @@ function rememberUserGovGearMemory(userId, data) {
     data,
   };
   saveGovGearMemoryStore(store);
+}
+
+function loadCharmsMemoryStore() {
+  try {
+    if (!fs.existsSync(CHARMS_MEMORY_FILE)) return {};
+    const raw = fs.readFileSync(CHARMS_MEMORY_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveCharmsMemoryStore(store) {
+  try {
+    const dir = path.dirname(CHARMS_MEMORY_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(CHARMS_MEMORY_FILE, JSON.stringify(store, null, 2), "utf8");
+  } catch (_) {
+    // ignore persistence failures
+  }
+}
+
+function getUserCharmsMemory(userId) {
+  const store = loadCharmsMemoryStore();
+  const value = store[String(userId)];
+  if (!value || typeof value !== "object") return null;
+  return value.data && typeof value.data === "object" ? value.data : null;
+}
+
+function rememberUserCharmsMemory(userId, data) {
+  const store = loadCharmsMemoryStore();
+  store[String(userId)] = {
+    updatedAt: new Date().toISOString(),
+    data,
+  };
+  saveCharmsMemoryStore(store);
 }
 
 function parseRequestIdFromCustomId(customId, expectedPrefix) {
@@ -1102,16 +1169,100 @@ function buildCharmsOptimizerResultText(data) {
   if (!data || typeof data !== "object") return "No optimization details were returned.";
   const rec = Array.isArray(data.recommendations) ? data.recommendations : [];
   if (!rec.length) return "No recommendations returned.";
-  const lines = rec.slice(0, 18).map((item, idx) => {
-    const name = item.charm?.name || item.charm?.id || "Charm";
-    const from = item.fromLevel ?? "?";
-    const to = item.toLevel ?? "?";
-    const sg = Number.isFinite(Number(item.statGain)) ? ` (+${item.statGain} stat)` : "";
-    return `${idx + 1}. **${name}**: Lv ${from} → Lv ${to}${sg}`;
-  });
-  const more = rec.length > 18 ? `\n… and **${rec.length - 18}** more in the full plan.` : "";
+
+  const parentPieceLabel = {
+    cavalry_gear_1: "Crown (calv1)",
+    cavalry_gear_2: "Pendant (calv2)",
+    infantry_gear_1: "Shirt (inf1)",
+    infantry_gear_2: "Pants (inf2)",
+    archery_gear_1: "Ring (arch1)",
+    archery_gear_2: "Baton (arch2)",
+  };
+  const groupOrder = [
+    "cavalry_gear_1",
+    "cavalry_gear_2",
+    "infantry_gear_1",
+    "infantry_gear_2",
+    "archery_gear_1",
+    "archery_gear_2",
+  ];
+
+  const parseCharmNumber = (item) => {
+    const id = String(item?.charm?.id || "");
+    const m = id.match(/_charm_(\d+)$/);
+    if (m) return Number(m[1]);
+    const name = String(item?.charm?.name || "");
+    const n = name.match(/Charm\s*(\d+)/i);
+    return n ? Number(n[1]) : Number.POSITIVE_INFINITY;
+  };
+
+  const grouped = new Map();
+  for (const key of groupOrder) grouped.set(key, []);
+  for (const item of rec) {
+    const key = item?.charm?.parentPiece || "other";
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(item);
+  }
+
+  const sections = [];
+  for (const key of [...groupOrder, ...Array.from(grouped.keys()).filter((k) => !groupOrder.includes(k))]) {
+    const items = grouped.get(key) || [];
+    if (!items.length) continue;
+    const byCharm = new Map();
+    for (const item of items) {
+      const charmId = String(item?.charm?.id || item?.charm?.name || "unknown_charm");
+      const from = Number(item?.fromLevel);
+      const to = Number(item?.toLevel);
+      const statGain = Number(item?.statGain);
+      if (!byCharm.has(charmId)) {
+        byCharm.set(charmId, {
+          item,
+          from: Number.isFinite(from) ? from : null,
+          to: Number.isFinite(to) ? to : null,
+          statGain: Number.isFinite(statGain) ? statGain : 0,
+          count: 1,
+          charmNumber: parseCharmNumber(item),
+        });
+      } else {
+        const agg = byCharm.get(charmId);
+        agg.count += 1;
+        if (Number.isFinite(from)) agg.from = agg.from == null ? from : Math.min(agg.from, from);
+        if (Number.isFinite(to)) agg.to = agg.to == null ? to : Math.max(agg.to, to);
+        if (Number.isFinite(statGain)) agg.statGain += statGain;
+      }
+    }
+    const merged = Array.from(byCharm.values()).sort((a, b) => {
+      if (a.charmNumber !== b.charmNumber) return a.charmNumber - b.charmNumber;
+      const aFrom = a.from == null ? Number.POSITIVE_INFINITY : a.from;
+      const bFrom = b.from == null ? Number.POSITIVE_INFINITY : b.from;
+      return aFrom - bFrom;
+    });
+    const title = parentPieceLabel[key] || key;
+    const lines = merged.slice(0, 5).map((entry, idx) => {
+      const name = entry.item?.charm?.name || entry.item?.charm?.id || "Charm";
+      const shortName = String(name).replace(/^.*Charm\s+/i, "Charm ");
+      const from = entry.from ?? "?";
+      const to = entry.to ?? "?";
+      const sg = entry.statGain > 0 ? ` (+${entry.statGain} stat)` : "";
+      const extra = entry.count > 1 ? ` (${entry.count} upgrades)` : "";
+      return `${idx + 1}. ${shortName}: Lv ${from} → Lv ${to}${sg}${extra}`;
+    });
+    const moreInGroup = merged.length > 5 ? `\n… and ${merged.length - 5} more for ${title}.` : "";
+    sections.push(`**${title}**\n${lines.join("\n")}${moreInGroup}`);
+  }
+
+  const totalMergedCount = Array.from(grouped.values()).reduce((acc, items) => {
+    const unique = new Set(items.map((it) => String(it?.charm?.id || it?.charm?.name || "unknown_charm")));
+    return acc + unique.size;
+  }, 0);
+  const shownCount = Array.from(grouped.values()).reduce((acc, items) => {
+    const unique = new Set(items.map((it) => String(it?.charm?.id || it?.charm?.name || "unknown_charm")));
+    return acc + Math.min(unique.size, 5);
+  }, 0);
+  const more =
+    totalMergedCount > shownCount ? `\n\n… and **${totalMergedCount - shownCount}** more merged entries in total.` : "";
   const hint = data.bottleneckAnalysis?.suggestion ? `\n\n**Note:** ${data.bottleneckAnalysis.suggestion}` : "";
-  return `${lines.join("\n")}${more}${hint}`;
+  return `${sections.join("\n\n")}${more}${hint}`;
 }
 
 function buildCharmsOptimizerReplyMarkdown(data) {
@@ -1229,7 +1380,7 @@ async function handlePublicApiShortcuts(message) {
   if (message.author.bot) return false;
   const sessionKey = getGovGearChatSessionKey(message);
   if (govGearChatSessions.has(sessionKey)) return false;
-  if (charmsChatSessions.has(sessionKey)) return false;
+  if (hasActiveCharmsPanelSessionForMessage(message)) return false;
 
   const text = String(message.content || "").trim();
   if (!text) return false;
@@ -1714,70 +1865,171 @@ async function submitGovGearModalSession(interaction, requestId) {
   await interaction.editReply(buildGovernorGearOptimizerReplyMarkdown(result.data));
 }
 
-async function sendCharmsWizardIntro(message) {
-  const embed = new EmbedBuilder()
-    .setColor(0xe91e63)
-    .setTitle("Charms optimizer — chat wizard")
-    .setDescription(
-      `**${CHARMS_TOTAL_CHAT_STEPS} steps:** **Charm Guides** → **Charm Designs** → **18 charms** (same order as the [Charms optimizer](https://kingshotoptimizer.com/charms/optimize)).\n\n` +
-        "Reply with **one number** per message. Type **cancel** to stop.\n\n" +
-        "Or use **`/optimizecharms`** to fill everything in one slash command."
-    )
-    .addFields(
-      {
-        name: "Cavalry (6 charms)",
-        value: "Piece 1: charms 1–3\nPiece 2: charms 1–3",
-        inline: true,
-      },
-      {
-        name: "Infantry (6 charms)",
-        value: "Piece 1: charms 1–3\nPiece 2: charms 1–3",
-        inline: true,
-      },
-      {
-        name: "Archery (6 charms)",
-        value: "Piece 1: charms 1–3\nPiece 2: charms 1–3",
-        inline: true,
-      }
-    )
-    .setFooter({ text: "Questions follow in order: materials, then Cav → Inf → Arch." });
-  await message.reply({ embeds: [embed] });
+function charmLevelLabel(level) {
+  return `Lv${level}`;
 }
 
-async function askNextCharmsChatStep(message, sessionKey) {
-  const session = charmsChatSessions.get(sessionKey);
-  if (!session) return;
-  const step = CHARMS_CHAT_STEPS[session.stepIndex];
-  if (!step) return;
-  await message.reply(step.prompt);
-}
-
-async function finishCharmsChatWizard(message, sessionKey, session) {
-  await message.reply("Running **charms optimizer**…");
-  const charmLevels = {};
-  for (const key of CHARM_LEVEL_API_KEYS) {
-    const v = Number(session.data[key] ?? 0);
-    charmLevels[key] = Math.max(0, Math.min(22, Number.isFinite(v) ? Math.floor(v) : 0));
-  }
-  const result = await fetchCharmsOptimization({
-    charmGuides: session.data.charmGuides,
-    charmDesigns: session.data.charmDesigns,
-    charmLevels,
+function getCharmsPanelSummaryLines(data) {
+  const lines = CHARMS_CLOTHS.map((cloth) => {
+    const levels = cloth.charmKeys.map((ck) => {
+      const lv = Number(data[ck]);
+      return Number.isFinite(lv) ? charmLevelLabel(Math.max(1, Math.min(22, lv))) : "—";
+    });
+    return `• ${cloth.label}: ${levels.join(" / ")}`;
   });
-  charmsChatSessions.delete(sessionKey);
+  const guides = Number(data.charmGuides ?? 0);
+  const designs = Number(data.charmDesigns ?? 0);
+  lines.push("");
+  lines.push(`Resources: Charm Guides ${guides} · Charm Designs ${designs}`);
+  return lines.join("\n");
+}
 
-  if (!result.ok) {
-    await message.reply(
-      `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/charms/optimize>`
-    );
-    return;
-  }
+function hasCompleteCharmsData(data) {
+  if (!data || typeof data !== "object") return false;
+  if (!Number.isFinite(Number(data.charmGuides)) || Number(data.charmGuides) < 0) return false;
+  if (!Number.isFinite(Number(data.charmDesigns)) || Number(data.charmDesigns) < 0) return false;
+  return CHARMS_CLOTHS.every((cloth) =>
+    cloth.charmKeys.every((ck) => {
+      const v = Number(data[ck]);
+      return Number.isFinite(v) && v >= 1 && v <= 22;
+    })
+  );
+}
 
-  let content = buildCharmsOptimizerReplyMarkdown(result.data);
-  if (content.length > 2000) {
-    content = `${content.slice(0, 1990)}…\n_(truncated — open the site for the full list.)_`;
-  }
-  await message.reply(content);
+function buildCharmsSavedReviewView(requestId, data) {
+  const clothButtons = CHARMS_CLOTHS.map((cloth, i) => {
+    const hasValue = cloth.charmKeys.every((ck) => Number.isFinite(Number(data[ck])));
+    return new ButtonBuilder()
+      .setCustomId(`optimizecharms:editslot:${requestId}:${i}`)
+      .setLabel(cloth.label)
+      .setStyle(hasValue ? ButtonStyle.Success : ButtonStyle.Secondary);
+  });
+
+  const row1 = new ActionRowBuilder().addComponents(clothButtons.slice(0, 3));
+  const row2 = new ActionRowBuilder().addComponents(clothButtons.slice(3, 6));
+  const row3 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`optimizecharms:resources:${requestId}`)
+      .setLabel("Set Resources")
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`optimizecharms:submit:${requestId}`)
+      .setLabel("Submit")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`optimizecharms:cancel:${requestId}`)
+      .setLabel("Cancel")
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return {
+    content:
+      "**Saved charms setup** (tap cloth to edit)\n\n" +
+      getCharmsPanelSummaryLines(data),
+    components: [row1, row2, row3],
+  };
+}
+
+function buildCharmsClothLevelView(requestId, cloth, mode, data, stepIndex = 0) {
+  const buildLevelOptions = (selectedLv) => {
+    const options = [];
+    for (let lv = 1; lv <= 22; lv += 1) {
+      options.push({
+        label: charmLevelLabel(lv),
+        value: String(lv),
+        default: lv === selectedLv,
+      });
+    }
+    return options;
+  };
+  const selected = cloth.charmKeys.map((ck) => {
+    const raw = Number(data?.[ck]);
+    return Number.isFinite(raw) ? Math.max(1, Math.min(22, raw)) : null;
+  });
+  const selects = cloth.charmKeys.map((ck, idx) =>
+    new StringSelectMenuBuilder()
+      .setCustomId(`optimizecharms:pick:${requestId}:${ck}:${mode}`)
+      .setPlaceholder(`${cloth.label} — Charm ${idx + 1}`)
+      .addOptions(buildLevelOptions(selected[idx]))
+  );
+
+  const primaryBtn =
+    mode === "seq"
+      ? new ButtonBuilder()
+          .setCustomId(`optimizecharms:nextcloth:${requestId}:${cloth.key}`)
+          .setLabel("Next Cloth")
+          .setStyle(ButtonStyle.Primary)
+      : null;
+
+  const secondaryBtn =
+    mode === "edit"
+      ? new ButtonBuilder()
+          .setCustomId(`optimizecharms:back:${requestId}`)
+          .setLabel("Back to panel")
+          .setStyle(ButtonStyle.Secondary)
+      : new ButtonBuilder()
+          .setCustomId(`optimizecharms:cancel:${requestId}`)
+          .setLabel("Cancel")
+          .setStyle(ButtonStyle.Danger);
+
+  const selectedSoFarLines = CHARMS_CLOTHS.map((c) => {
+    const levels = c.charmKeys.map((ck) => {
+      const v = Number(data?.[ck]);
+      return Number.isFinite(v) ? charmLevelLabel(Math.max(1, Math.min(22, v))) : null;
+    });
+    if (!levels.some(Boolean)) return null;
+    return `• ${c.label}: ${levels.map((v) => v || "—").join(" / ")}`;
+  }).filter(Boolean);
+  const selectedSoFar = selectedSoFarLines.length
+    ? selectedSoFarLines.join("\n")
+    : "• (none selected yet)";
+
+  return {
+    content:
+      `**Step ${Math.max(1, stepIndex + 1)}/${CHARMS_CLOTHS.length}** — ${cloth.label}\n` +
+      "Pick **three levels** from the lists below (Charm 1/2/3).\n\n" +
+      `Selected so far:\n${selectedSoFar}`,
+    components: [
+      new ActionRowBuilder().addComponents(selects[0]),
+      new ActionRowBuilder().addComponents(selects[1]),
+      new ActionRowBuilder().addComponents(selects[2]),
+      primaryBtn
+        ? new ActionRowBuilder().addComponents(primaryBtn, secondaryBtn)
+        : new ActionRowBuilder().addComponents(secondaryBtn),
+    ],
+  };
+}
+
+function buildCharmsResourcesModal(requestId, defaults = {}) {
+  const modal = new ModalBuilder()
+    .setCustomId(`optimizecharms:modalresources:${requestId}`)
+    .setTitle("Charms Resources");
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("charmGuides")
+        .setLabel("Charm Guides")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setValue(String(defaults.charmGuides ?? 0))
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("charmDesigns")
+        .setLabel("Charm Designs")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setValue(String(defaults.charmDesigns ?? 0))
+    )
+  );
+  return modal;
+}
+
+function buildCharmsLevelsPayloadFromSession(sessionData) {
+  const charmLevels = {};
+  for (const cloth of CHARMS_CLOTHS) for (const ck of cloth.charmKeys)
+    charmLevels[ck] = Math.max(1, Math.min(22, Number(sessionData[ck] ?? 1)));
+  return charmLevels;
 }
 
 /** @returns {Promise<boolean>} */
@@ -1785,68 +2037,38 @@ async function handleCharmsChatMessage(message) {
   if (!message.guild || !message.content) return false;
   if (!isGovGearAllowedContext(message.guildId, message.channelId)) return false;
 
-  const sessionKey = getGovGearChatSessionKey(message);
-  const existing = charmsChatSessions.get(sessionKey);
-
-  if (!existing) {
-    const normalized = normalizeTriggerText(message.content);
-    if (!CHARMS_CHAT_TRIGGER_PHRASES.has(normalized)) return false;
-    if (govGearChatSessions.has(sessionKey)) {
-      govGearChatSessions.delete(sessionKey);
-      await message.reply("Ending **Governor Gear** wizard — starting **Charms** wizard.");
-    }
-    charmsChatSessions.set(sessionKey, { stepIndex: 0, data: {}, createdAt: Date.now() });
-    await sendCharmsWizardIntro(message);
-    await askNextCharmsChatStep(message, sessionKey);
-    return true;
-  }
-
   const normalized = normalizeTriggerText(message.content);
-  if (GOV_GEAR_CHAT_CANCEL_PHRASES.has(normalized)) {
-    charmsChatSessions.delete(sessionKey);
-    await message.reply("Charms wizard **cancelled**.");
+  if (!CHARMS_CHAT_TRIGGER_PHRASES.has(normalized)) return false;
+
+  const sessionKey = getGovGearChatSessionKey(message);
+  if (govGearChatSessions.has(sessionKey)) {
+    govGearChatSessions.delete(sessionKey);
+    await message.reply("Ending **Governor Gear** wizard — starting **Charms** panel.");
+  }
+  clearCharmsPanelSessionsForMessage(message);
+
+  const requestId = `${message.author.id}-${Date.now()}`;
+  const defaults = {
+    charmGuides: 0,
+    charmDesigns: 0,
+  };
+  const memory = getUserCharmsMemory(message.author.id) || {};
+  const initialData = { ...defaults, ...memory };
+  charmsPanelSessions.set(requestId, {
+    userId: message.author.id,
+    channelId: message.channelId,
+    data: initialData,
+    slotIndex: 0,
+    createdAt: Date.now(),
+  });
+  if (hasCompleteCharmsData(memory)) {
+    const review = buildCharmsSavedReviewView(requestId, initialData);
+    await message.reply({ content: review.content, components: review.components });
     return true;
   }
-
-  const step = CHARMS_CHAT_STEPS[existing.stepIndex];
-  if (!step) {
-    charmsChatSessions.delete(sessionKey);
-    return true;
-  }
-
-  if (step.kind === "resource") {
-    const value = Number(message.content.trim());
-    if (!Number.isFinite(value) || value < 0) {
-      await message.reply("Please enter a valid **non-negative** whole number.");
-      await askNextCharmsChatStep(message, sessionKey);
-      return true;
-    }
-    existing.data[step.key] = Math.floor(value);
-  } else if (step.kind === "charmLevel") {
-    const raw = message.content.trim();
-    if (!/^-?\d+$/.test(raw)) {
-      await message.reply("Please send **one whole number** from **0** to **22**.");
-      await askNextCharmsChatStep(message, sessionKey);
-      return true;
-    }
-    const v = parseInt(raw, 10);
-    if (v < 0 || v > 22) {
-      await message.reply("Level must be between **0** (not started) and **22**.");
-      await askNextCharmsChatStep(message, sessionKey);
-      return true;
-    }
-    existing.data[step.key] = v;
-  }
-
-  existing.stepIndex += 1;
-  charmsChatSessions.set(sessionKey, existing);
-
-  if (existing.stepIndex >= CHARMS_CHAT_STEPS.length) {
-    await finishCharmsChatWizard(message, sessionKey, existing);
-    return true;
-  }
-
-  await askNextCharmsChatStep(message, sessionKey);
+  const first = CHARMS_CLOTHS[0];
+  const view = buildCharmsClothLevelView(requestId, first, "seq", initialData, 0);
+  await message.reply({ content: view.content, components: view.components });
   return true;
 }
 
@@ -1859,7 +2081,7 @@ async function handleGovGearChatMessage(message) {
   if (!existing) {
     const normalized = normalizeTriggerText(message.content);
     if (!GOV_GEAR_CHAT_TRIGGER_PHRASES.has(normalized)) return;
-    charmsChatSessions.delete(sessionKey);
+    clearCharmsPanelSessionsForMessage(message);
     const requestId = `${message.author.id}-${Date.now()}`;
     const lastMemory = getUserGovGearMemory(message.author.id) || {};
     govGearModalSessions.set(requestId, { userId: message.author.id, data: { ...lastMemory }, createdAt: Date.now() });
@@ -1964,16 +2186,147 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
 
-  const isOptimizeGovGearComponent =
+  const isOptimizeComponent =
     (interaction.isButton() && interaction.customId.startsWith("optimizegovgear:")) ||
+    (interaction.isButton() && interaction.customId.startsWith("optimizecharms:")) ||
     (interaction.isStringSelectMenu() && interaction.customId.startsWith("optimizegovgear:")) ||
-    (interaction.isModalSubmit() && interaction.customId.startsWith("optimizegovgear:"));
-  if (isOptimizeGovGearComponent && !isGovGearAllowedContext(interaction.guildId, interaction.channelId)) {
+    (interaction.isStringSelectMenu() && interaction.customId.startsWith("optimizecharms:")) ||
+    (interaction.isModalSubmit() && interaction.customId.startsWith("optimizegovgear:")) ||
+    (interaction.isModalSubmit() && interaction.customId.startsWith("optimizecharms:"));
+  if (isOptimizeComponent && !isGovGearAllowedContext(interaction.guildId, interaction.channelId)) {
     await replyGovGearWrongChannel(interaction);
     return;
   }
 
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith("optimizecharms:cloth:")) {
+      const parts = interaction.customId.split(":");
+      const requestId = parts[2];
+      const clothKey = parts[3];
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const cloth = CHARMS_CLOTHS.find((c) => c.key === clothKey);
+      if (!cloth) {
+        await interaction.reply({ content: "Invalid charms cloth selection.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const slotIndex = CHARMS_CLOTHS.findIndex((c) => c.key === cloth.key);
+      session.slotIndex = slotIndex >= 0 ? slotIndex : 0;
+      charmsPanelSessions.set(requestId, session);
+      const view = buildCharmsClothLevelView(requestId, cloth, "edit", session.data, session.slotIndex);
+      await interaction.update({ content: view.content, components: view.components });
+      return;
+    }
+    if (interaction.customId.startsWith("optimizecharms:editslot:")) {
+      const parts = interaction.customId.split(":");
+      const requestId = parts[2];
+      const slotIndex = Number(parts[3]);
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      if (!Number.isFinite(slotIndex) || slotIndex < 0 || slotIndex >= CHARMS_CLOTHS.length) {
+        await interaction.reply({ content: "Invalid charms cloth selection.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      session.slotIndex = slotIndex;
+      charmsPanelSessions.set(requestId, session);
+      const cloth = CHARMS_CLOTHS[slotIndex];
+      const view = buildCharmsClothLevelView(requestId, cloth, "edit", session.data, slotIndex);
+      await interaction.update({ content: view.content, components: view.components });
+      return;
+    }
+    if (interaction.customId.startsWith("optimizecharms:nextcloth:")) {
+      const parts = interaction.customId.split(":");
+      const requestId = parts[2];
+      const clothKey = parts[3];
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const idx = CHARMS_CLOTHS.findIndex((c) => c.key === clothKey);
+      if (idx < 0) {
+        await interaction.reply({ content: "Invalid charms cloth selection.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const nextIndex = idx + 1;
+      if (nextIndex < CHARMS_CLOTHS.length) {
+        session.slotIndex = nextIndex;
+        charmsPanelSessions.set(requestId, session);
+        const nextCloth = CHARMS_CLOTHS[nextIndex];
+        const view = buildCharmsClothLevelView(requestId, nextCloth, "seq", session.data, nextIndex);
+        await interaction.update({ content: view.content, components: view.components });
+        return;
+      }
+      const review = buildCharmsSavedReviewView(requestId, session.data);
+      await interaction.update({ content: review.content, components: review.components });
+      return;
+    }
+    if (interaction.customId.startsWith("optimizecharms:resources:")) {
+      const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizecharms:resources:");
+      if (!requestId) return;
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      await interaction.showModal(buildCharmsResourcesModal(requestId, session.data));
+      return;
+    }
+    if (interaction.customId.startsWith("optimizecharms:back:")) {
+      const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizecharms:back:");
+      if (!requestId) return;
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const panel = buildCharmsSavedReviewView(requestId, session.data);
+      await interaction.update({ content: panel.content, components: panel.components });
+      return;
+    }
+    if (interaction.customId.startsWith("optimizecharms:cancel:")) {
+      const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizecharms:cancel:");
+      if (!requestId) return;
+      charmsPanelSessions.delete(requestId);
+      await interaction.update({ content: "Charms panel cancelled.", components: [] });
+      return;
+    }
+    if (interaction.customId.startsWith("optimizecharms:submit:")) {
+      const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizecharms:submit:");
+      if (!requestId) return;
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const result = await fetchCharmsOptimization({
+        charmGuides: Number(session.data.charmGuides ?? 0),
+        charmDesigns: Number(session.data.charmDesigns ?? 0),
+        charmLevels: buildCharmsLevelsPayloadFromSession(session.data),
+      });
+      rememberUserCharmsMemory(interaction.user.id, session.data);
+      charmsPanelSessions.delete(requestId);
+      if (!result.ok) {
+        await interaction.editReply(
+          `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/charms/optimize>`
+        );
+        return;
+      }
+      let content = buildCharmsOptimizerReplyMarkdown(result.data);
+      if (content.length > 2000) {
+        content = `${content.slice(0, 1990)}…\n_(truncated — open the site for the full list.)_`;
+      }
+      await interaction.editReply(content);
+      return;
+    }
+
     if (interaction.customId.startsWith("optimizegovgear:submit:")) {
       await handleGovGearSubmitButton(interaction);
       return;
@@ -2179,6 +2532,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.isStringSelectMenu()) {
+    if (interaction.customId.startsWith("optimizecharms:pick:")) {
+      const parts = interaction.customId.split(":");
+      const requestId = parts[2];
+      const charmKey = parts[3];
+      const mode = parts[4] || "seq";
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({
+          content: "This charms panel session expired. Type `charms` again.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      const cloth = CHARMS_CLOTHS.find((c) => c.charmKeys.includes(charmKey));
+      if (!cloth) {
+        await interaction.reply({ content: "Invalid charms cloth selection.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const selectedLv = Number(interaction.values[0]);
+      session.data[charmKey] = Math.max(1, Math.min(22, Number.isFinite(selectedLv) ? selectedLv : 1));
+      charmsPanelSessions.set(requestId, session);
+
+      if (mode === "edit") {
+        const slotIndex = CHARMS_CLOTHS.findIndex((c) => c.key === cloth.key);
+        const view = buildCharmsClothLevelView(requestId, cloth, "edit", session.data, slotIndex);
+        await interaction.update({ content: view.content, components: view.components });
+        return;
+      }
+      const idx = CHARMS_CLOTHS.findIndex((c) => c.key === cloth.key);
+      const view = buildCharmsClothLevelView(requestId, cloth, "seq", session.data, idx);
+      await interaction.update({ content: view.content, components: view.components });
+      return;
+    }
+
     if (interaction.customId.startsWith("optimizegovgear:pick:")) {
       const parts = interaction.customId.split(":");
       const requestId = parts[2];
@@ -2251,6 +2638,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith("optimizecharms:modalresources:")) {
+      const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizecharms:modalresources:");
+      if (!requestId) return;
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({
+          content: "This charms panel session expired. Type `charms` again.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      const guides = Number(interaction.fields.getTextInputValue("charmGuides"));
+      const designs = Number(interaction.fields.getTextInputValue("charmDesigns"));
+      if (!Number.isFinite(guides) || guides < 0 || !Number.isFinite(designs) || designs < 0) {
+        await interaction.reply({
+          content: "Resources must be non-negative whole numbers.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      session.data.charmGuides = Math.floor(guides);
+      session.data.charmDesigns = Math.floor(designs);
+      charmsPanelSessions.set(requestId, session);
+      rememberUserCharmsMemory(interaction.user.id, session.data);
+      const review = buildCharmsSavedReviewView(requestId, session.data);
+      await interaction.reply({
+        content: `Resources saved.\n\n${review.content}`,
+        components: review.components,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     if (interaction.customId.startsWith("optimizegovgear:modal1:")) {
       const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizegovgear:modal1:");
       if (!requestId) return;
