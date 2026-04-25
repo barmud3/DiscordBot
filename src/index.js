@@ -55,7 +55,7 @@ const CHARM_SLASH_LEVEL_LABELS = [
 const CHARMS_CLOTHS = [
   {
     key: "cloth1",
-    label: "Crown (calv1)",
+    label: "Hat (calv1)",
     charmKeys: ["cavalry_gear_1_charm_1", "cavalry_gear_1_charm_2", "cavalry_gear_1_charm_3"],
   },
   {
@@ -1171,7 +1171,7 @@ function buildCharmsOptimizerResultText(data) {
   if (!rec.length) return "No recommendations returned.";
 
   const parentPieceLabel = {
-    cavalry_gear_1: "Crown (calv1)",
+    cavalry_gear_1: "Hat (calv1)",
     cavalry_gear_2: "Pendant (calv2)",
     infantry_gear_1: "Shirt (inf1)",
     infantry_gear_2: "Pants (inf2)",
@@ -1921,12 +1921,18 @@ function buildCharmsSavedReviewView(requestId, data) {
       .setLabel("Cancel")
       .setStyle(ButtonStyle.Danger)
   );
+  const row4 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`optimizecharms:restart:${requestId}`)
+      .setLabel("Start from beginning")
+      .setStyle(ButtonStyle.Secondary)
+  );
 
   return {
     content:
       "**Saved charms setup** (tap cloth to edit)\n\n" +
       getCharmsPanelSummaryLines(data),
-    components: [row1, row2, row3],
+    components: [row1, row2, row3, row4],
   };
 }
 
@@ -1952,7 +1958,6 @@ function buildCharmsClothLevelView(requestId, cloth, mode, data, stepIndex = 0) 
       .setPlaceholder(`${cloth.label} — Charm ${idx + 1}`)
       .addOptions(buildLevelOptions(selected[idx]))
   );
-
   const primaryBtn =
     mode === "seq"
       ? new ButtonBuilder()
@@ -1960,7 +1965,10 @@ function buildCharmsClothLevelView(requestId, cloth, mode, data, stepIndex = 0) 
           .setLabel("Next Cloth")
           .setStyle(ButtonStyle.Primary)
       : null;
-
+  const setFixedBtn = new ButtonBuilder()
+    .setCustomId(`optimizecharms:setfixed:${requestId}:${cloth.key}:${mode}`)
+    .setLabel("Set same Lv")
+    .setStyle(ButtonStyle.Secondary);
   const secondaryBtn =
     mode === "edit"
       ? new ButtonBuilder()
@@ -1994,10 +2002,31 @@ function buildCharmsClothLevelView(requestId, cloth, mode, data, stepIndex = 0) 
       new ActionRowBuilder().addComponents(selects[1]),
       new ActionRowBuilder().addComponents(selects[2]),
       primaryBtn
-        ? new ActionRowBuilder().addComponents(primaryBtn, secondaryBtn)
-        : new ActionRowBuilder().addComponents(secondaryBtn),
+        ? new ActionRowBuilder().addComponents(primaryBtn, setFixedBtn, secondaryBtn)
+        : new ActionRowBuilder().addComponents(setFixedBtn, secondaryBtn),
     ],
   };
+}
+
+function buildCharmsSetFixedLevelModal(requestId, clothKey, mode, currentData = {}) {
+  const cloth = CHARMS_CLOTHS.find((c) => c.key === clothKey);
+  const title = cloth ? cloth.label : clothKey;
+  const firstCharmKey = cloth?.charmKeys?.[0];
+  const current = Number(firstCharmKey ? currentData[firstCharmKey] : null);
+  const modal = new ModalBuilder()
+    .setCustomId(`optimizecharms:modalsetfixed:${requestId}:${clothKey}:${mode}`)
+    .setTitle(`Set same Lv — ${title}`);
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId("level")
+        .setLabel("Level (1-22)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setValue(Number.isFinite(current) ? String(Math.max(1, Math.min(22, current))) : "1")
+    )
+  );
+  return modal;
 }
 
 function buildCharmsResourcesModal(requestId, defaults = {}) {
@@ -2267,6 +2296,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.update({ content: review.content, components: review.components });
       return;
     }
+    if (interaction.customId.startsWith("optimizecharms:setfixed:")) {
+      const parts = interaction.customId.split(":");
+      const requestId = parts[2];
+      const clothKey = parts[3];
+      const mode = parts[4] || "seq";
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      await interaction.showModal(buildCharmsSetFixedLevelModal(requestId, clothKey, mode, session.data));
+      return;
+    }
+    if (interaction.customId.startsWith("optimizecharms:clothback:")) {
+      const parts = interaction.customId.split(":");
+      const requestId = parts[2];
+      const clothKey = parts[3];
+      const mode = parts[4] || "seq";
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const cloth = CHARMS_CLOTHS.find((c) => c.key === clothKey);
+      if (!cloth) {
+        await interaction.reply({ content: "Invalid charms cloth selection.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const idx = CHARMS_CLOTHS.findIndex((c) => c.key === cloth.key);
+      const view = buildCharmsClothLevelView(requestId, cloth, mode, session.data, idx);
+      await interaction.update({ content: view.content, components: view.components });
+      return;
+    }
     if (interaction.customId.startsWith("optimizecharms:resources:")) {
       const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizecharms:resources:");
       if (!requestId) return;
@@ -2295,6 +2357,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!requestId) return;
       charmsPanelSessions.delete(requestId);
       await interaction.update({ content: "Charms panel cancelled.", components: [] });
+      return;
+    }
+    if (interaction.customId.startsWith("optimizecharms:restart:")) {
+      const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizecharms:restart:");
+      if (!requestId) return;
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({ content: "This charms panel session expired. Type `charms` again.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const resetData = {
+        charmGuides: Number(session.data.charmGuides ?? 0),
+        charmDesigns: Number(session.data.charmDesigns ?? 0),
+      };
+      for (const cloth of CHARMS_CLOTHS) {
+        for (const ck of cloth.charmKeys) resetData[ck] = undefined;
+      }
+      session.data = resetData;
+      session.slotIndex = 0;
+      charmsPanelSessions.set(requestId, session);
+      const first = CHARMS_CLOTHS[0];
+      const view = buildCharmsClothLevelView(requestId, first, "seq", session.data, 0);
+      await interaction.update({ content: view.content, components: view.components });
       return;
     }
     if (interaction.customId.startsWith("optimizecharms:submit:")) {
@@ -2638,6 +2723,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.isModalSubmit()) {
+    if (interaction.customId.startsWith("optimizecharms:modalsetfixed:")) {
+      const parts = interaction.customId.split(":");
+      const requestId = parts[2];
+      const clothKey = parts[3];
+      const mode = parts[4] || "seq";
+      const session = charmsPanelSessions.get(requestId);
+      if (!session || session.userId !== interaction.user.id) {
+        await interaction.reply({
+          content: "This charms panel session expired. Type `charms` again.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+      const cloth = CHARMS_CLOTHS.find((c) => c.key === clothKey);
+      if (!cloth) {
+        await interaction.reply({ content: "Invalid charms cloth selection.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const lv = Number(interaction.fields.getTextInputValue("level"));
+      if (!Number.isFinite(lv) || lv < 1 || lv > 22) {
+        await interaction.reply({ content: "Level must be a whole number between 1 and 22.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const fixed = Math.floor(lv);
+      for (const ck of cloth.charmKeys) session.data[ck] = fixed;
+      charmsPanelSessions.set(requestId, session);
+      const idx = CHARMS_CLOTHS.findIndex((c) => c.key === cloth.key);
+      const view = buildCharmsClothLevelView(requestId, cloth, mode, session.data, idx);
+      await interaction.reply({
+        content: `Applied **${charmLevelLabel(fixed)}** to all charms for **${cloth.label}**.\n\n${view.content}`,
+        components: view.components,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     if (interaction.customId.startsWith("optimizecharms:modalresources:")) {
       const requestId = parseRequestIdFromCustomId(interaction.customId, "optimizecharms:modalresources:");
       if (!requestId) return;
