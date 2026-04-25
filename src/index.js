@@ -26,7 +26,52 @@ const {
   fetchKvkMatchesForKingdom,
   fetchKingdomTrackerById,
   fetchGovernorGearOptimization,
+  fetchCharmsOptimization,
+  CHARM_LEVEL_API_KEYS,
 } = require("./kingshot-api");
+
+/** Parallel to `CHARM_LEVEL_API_KEYS` — slash option descriptions (max 100 chars each). */
+const CHARM_SLASH_LEVEL_LABELS = [
+  "Cavalry gear 1 — charm 1",
+  "Cavalry gear 1 — charm 2",
+  "Cavalry gear 1 — charm 3",
+  "Cavalry gear 2 — charm 1",
+  "Cavalry gear 2 — charm 2",
+  "Cavalry gear 2 — charm 3",
+  "Infantry gear 1 — charm 1",
+  "Infantry gear 1 — charm 2",
+  "Infantry gear 1 — charm 3",
+  "Infantry gear 2 — charm 1",
+  "Infantry gear 2 — charm 2",
+  "Infantry gear 2 — charm 3",
+  "Archery gear 1 — charm 1",
+  "Archery gear 1 — charm 2",
+  "Archery gear 1 — charm 3",
+  "Archery gear 2 — charm 1",
+  "Archery gear 2 — charm 2",
+  "Archery gear 2 — charm 3",
+];
+
+const CHARMS_TOTAL_CHAT_STEPS = 2 + CHARM_LEVEL_API_KEYS.length;
+const CHARMS_CHAT_STEPS = [
+  {
+    key: "charmGuides",
+    kind: "resource",
+    prompt: `**Step 1/${CHARMS_TOTAL_CHAT_STEPS}** — Materials\nHow many **Charm Guides** do you have? (whole number **≥ 0**)`,
+  },
+  {
+    key: "charmDesigns",
+    kind: "resource",
+    prompt: `**Step 2/${CHARMS_TOTAL_CHAT_STEPS}** — Materials\nHow many **Charm Designs** do you have? (whole number **≥ 0**)`,
+  },
+  ...CHARM_LEVEL_API_KEYS.map((apiKey, i) => ({
+    key: apiKey,
+    kind: "charmLevel",
+    prompt: `**Step ${i + 3}/${CHARMS_TOTAL_CHAT_STEPS}** — **${
+      CHARM_SLASH_LEVEL_LABELS[i] || apiKey
+    }**\nCurrent level **0–22** (0 = not started). Reply with **one number** only.`,
+  })),
+];
 
 const token = process.env.DISCORD_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
@@ -45,18 +90,56 @@ const nicknameDeleteMessage =
 /** @type {Map<string, number>} */
 const nicknameCooldownUntil = new Map();
 
-/** If set, /optimizegovgear, its autocomplete, "gov gear" chat triggers, and all gear panel buttons/selects/modals only work in this channel. */
-const govGearChannelId = (process.env.GOV_GEAR_CHANNEL_ID || "").trim();
-const restrictGovGearToChannel = Boolean(govGearChannelId);
+/** If set, optimizer slash commands, gov-gear autocomplete, gov/charms chat wizards,
+and gov-gear panel UI can be restricted by guild and/or channel.
+Supports comma-separated `GOV_GEAR_GUILD_IDS` + `GOV_GEAR_CHANNEL_IDS`;
+legacy singular keys still work. */
+const govGearGuildIds = Array.from(
+  new Set(
+    String(process.env.GOV_GEAR_GUILD_IDS || process.env.GOV_GEAR_GUILD_ID || "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean)
+  )
+);
+const govGearChannelIds = Array.from(
+  new Set(
+    String(process.env.GOV_GEAR_CHANNEL_IDS || process.env.GOV_GEAR_CHANNEL_ID || "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean)
+  )
+);
+const restrictGovGearToGuild = govGearGuildIds.length > 0;
+const restrictGovGearToChannel = govGearChannelIds.length > 0;
 
-function isGovGearAllowedChannel(channelId) {
-  if (!restrictGovGearToChannel) return true;
-  return String(channelId || "") === govGearChannelId;
+function isGovGearAllowedContext(guildId, channelId) {
+  if (restrictGovGearToGuild) {
+    if (!guildId) return false;
+    if (!govGearGuildIds.includes(String(guildId))) return false;
+  }
+  if (restrictGovGearToChannel) {
+    if (!govGearChannelIds.includes(String(channelId || ""))) return false;
+  }
+  return true;
+}
+
+function formatGovGearAllowedTargetMention() {
+  const guildPart = govGearGuildIds.length
+    ? `server ID(s): ${govGearGuildIds.join(", ")}`
+    : "";
+  const channelPart = govGearChannelIds.length
+    ? `channel(s): ${govGearChannelIds.map((id) => `<#${id}>`).join(", ")}`
+    : "";
+  if (guildPart && channelPart) return `${guildPart} • ${channelPart}`;
+  if (guildPart) return guildPart;
+  if (channelPart) return channelPart;
+  return "this server";
 }
 
 /** @param {import("discord.js").BaseInteraction} interaction */
 async function replyGovGearWrongChannel(interaction) {
-  const content = `Governor gear is only available in <#${govGearChannelId}>.`;
+  const content = `Optimizer commands are only available in ${formatGovGearAllowedTargetMention()}.`;
   try {
     if (interaction.deferred || interaction.replied) {
       await interaction.followUp({ content, flags: MessageFlags.Ephemeral });
@@ -68,9 +151,36 @@ async function replyGovGearWrongChannel(interaction) {
   }
 }
 
+function isUnknownInteractionError(error) {
+  const code = Number(error?.code ?? error?.rawError?.code);
+  return code === 10062;
+}
+
 if (!token || !clientId) {
   console.error("Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in .env");
   process.exit(1);
+}
+
+const optimizeCharmsSlash = new SlashCommandBuilder()
+  .setName("optimizecharms")
+  .setDescription("Charm upgrade plan (Kingshot Optimizer)")
+  .addIntegerOption((o) =>
+    o.setName("charm_guides").setDescription("Available Charm Guides").setRequired(true).setMinValue(0)
+  )
+  .addIntegerOption((o) =>
+    o.setName("charm_designs").setDescription("Available Charm Designs").setRequired(true).setMinValue(0)
+  );
+for (let i = 0; i < CHARM_LEVEL_API_KEYS.length; i++) {
+  const key = CHARM_LEVEL_API_KEYS[i];
+  const label = CHARM_SLASH_LEVEL_LABELS[i] || key;
+  optimizeCharmsSlash.addIntegerOption((o) =>
+    o
+      .setName(key)
+      .setDescription(label.length > 100 ? `${label.slice(0, 97)}...` : label)
+      .setRequired(false)
+      .setMinValue(0)
+      .setMaxValue(22)
+  );
 }
 
 const commands = [
@@ -159,6 +269,7 @@ const commands = [
         .setRequired(true)
         .setAutocomplete(true)
     ),
+  optimizeCharmsSlash,
 ];
 
 const GOV_GEAR_LEVELS = [
@@ -223,6 +334,7 @@ const GOV_GEAR_LEVELS = [
 ];
 const pendingGovGearSubmissions = new Map();
 const govGearChatSessions = new Map();
+const charmsChatSessions = new Map();
 const govGearModalSessions = new Map();
 const GOV_GEAR_MEMORY_FILE = path.resolve(__dirname, "..", "data", "govgear-user-memory.json");
 const GOV_GEAR_CHAT_TRIGGER_PHRASES = new Set([
@@ -232,6 +344,8 @@ const GOV_GEAR_CHAT_TRIGGER_PHRASES = new Set([
   "גוב גיר",
   "גוברמנט גיר",
 ]);
+/** Whole message (after `normalizeTriggerText`) must match — starts charms chat wizard. */
+const CHARMS_CHAT_TRIGGER_PHRASES = new Set(["charms", "charm", "צארמ", "צארמס"]);
 const GOV_GEAR_CHAT_CANCEL_PHRASES = new Set(["cancel", "exit", "stop", "quit"]);
 
 const GOV_GEAR_CHAT_STEPS = [
@@ -970,6 +1084,42 @@ function buildGovernorGearOptimizerReplyMarkdown(data) {
   return `Optimizer recommendation:\n${summary}\n\n${detail}\n\nSource: <https://kingshotoptimizer.com/governor-gear/optimize>`;
 }
 
+function buildCharmsOptimizerSummaryLine(data) {
+  if (!data || typeof data !== "object") return "";
+  const rec = Array.isArray(data.recommendations) ? data.recommendations : [];
+  const upgrades = rec.length;
+  const stat = Number(data.totalStatGain);
+  const pow = Number(data.totalPowerGain);
+  const ev = Number(data.totalEventPoints);
+  let line = `**${upgrades}** upgrade${upgrades === 1 ? "" : "s"} · **+${formatOptimizerPower(stat)}** total stat gain · **+${formatOptimizerPower(pow)}** power`;
+  if (Number.isFinite(ev) && ev > 0) {
+    line += ` · **+${formatOptimizerPower(ev)}** event pts`;
+  }
+  return line;
+}
+
+function buildCharmsOptimizerResultText(data) {
+  if (!data || typeof data !== "object") return "No optimization details were returned.";
+  const rec = Array.isArray(data.recommendations) ? data.recommendations : [];
+  if (!rec.length) return "No recommendations returned.";
+  const lines = rec.slice(0, 18).map((item, idx) => {
+    const name = item.charm?.name || item.charm?.id || "Charm";
+    const from = item.fromLevel ?? "?";
+    const to = item.toLevel ?? "?";
+    const sg = Number.isFinite(Number(item.statGain)) ? ` (+${item.statGain} stat)` : "";
+    return `${idx + 1}. **${name}**: Lv ${from} → Lv ${to}${sg}`;
+  });
+  const more = rec.length > 18 ? `\n… and **${rec.length - 18}** more in the full plan.` : "";
+  const hint = data.bottleneckAnalysis?.suggestion ? `\n\n**Note:** ${data.bottleneckAnalysis.suggestion}` : "";
+  return `${lines.join("\n")}${more}${hint}`;
+}
+
+function buildCharmsOptimizerReplyMarkdown(data) {
+  const summary = buildCharmsOptimizerSummaryLine(data);
+  const detail = buildCharmsOptimizerResultText(data);
+  return `Charms optimizer:\n${summary}\n\n${detail}\n\nSource: <https://kingshotoptimizer.com/charms/optimize>`;
+}
+
 function buildOptimizerResultText(data) {
   if (!data || typeof data !== "object") return "No optimization details were returned.";
 
@@ -1003,7 +1153,7 @@ function buildOptimizerResultText(data) {
     };
 
     const grouped = new Map();
-    for (const item of topArray.slice(0, 20)) {
+    for (const item of topArray) {
       if (typeof item === "string") continue;
       const pieceId = item.piece?.id || item.slot || item.item || item.name || "unknown_piece";
       const displayName =
@@ -1037,7 +1187,8 @@ function buildOptimizerResultText(data) {
       }
     }
 
-    const lines = Array.from(grouped.values())
+    const groupedValues = Array.from(grouped.values());
+    const lines = groupedValues
       .slice(0, 8)
       .map((entry, index) => {
         if (Number.isFinite(entry.fromStep) && Number.isFinite(entry.toStep)) {
@@ -1048,7 +1199,12 @@ function buildOptimizerResultText(data) {
         const toText = entry.to || "?";
         return `${index + 1}. ${entry.piece}: ${fromText} -> ${toText}`;
       });
-    return lines.join("\n");
+    const hiddenPieceCount = Math.max(0, groupedValues.length - lines.length);
+    const pieceNote =
+      hiddenPieceCount > 0
+        ? `\n… plus ${hiddenPieceCount} more gear piece${hiddenPieceCount === 1 ? "" : "s"}.`
+        : "";
+    return `${lines.join("\n")}\n\n(Showing grouped plan across all **${topArray.length}** upgrades.)${pieceNote}`;
   }
 
   if (typeof data.summary === "string" && data.summary.trim()) return data.summary.trim();
@@ -1068,11 +1224,12 @@ async function registerCommands() {
   }
 }
 
-/** Chat shortcuts (plain messages). Returns true if this message was handled. Skipped while governor gear chat wizard is active. */
+/** Chat shortcuts (plain messages). Returns true if this message was handled. Skipped while governor or charms chat wizard is active. */
 async function handlePublicApiShortcuts(message) {
   if (message.author.bot) return false;
   const sessionKey = getGovGearChatSessionKey(message);
   if (govGearChatSessions.has(sessionKey)) return false;
+  if (charmsChatSessions.has(sessionKey)) return false;
 
   const text = String(message.content || "").trim();
   if (!text) return false;
@@ -1241,6 +1398,31 @@ async function handleOptimizeGovGear(interaction) {
     components: [row],
     flags: MessageFlags.Ephemeral,
   });
+}
+
+async function handleOptimizeCharms(interaction) {
+  const charmGuides = interaction.options.getInteger("charm_guides", true);
+  const charmDesigns = interaction.options.getInteger("charm_designs", true);
+  const charmLevels = {};
+  for (const key of CHARM_LEVEL_API_KEYS) {
+    const v = interaction.options.getInteger(key);
+    charmLevels[key] = v != null ? v : 0;
+  }
+
+  const result = await fetchCharmsOptimization({ charmGuides, charmDesigns, charmLevels });
+  if (!result.ok) {
+    await interaction.editReply({
+      content: `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/charms/optimize>`,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  let content = buildCharmsOptimizerReplyMarkdown(result.data);
+  if (content.length > 2000) {
+    content = `${content.slice(0, 1990)}…\n_(truncated — open the site for the full list.)_`;
+  }
+  await interaction.editReply({ content, flags: MessageFlags.Ephemeral });
 }
 
 async function handleGovGearSubmitButton(interaction) {
@@ -1532,15 +1714,152 @@ async function submitGovGearModalSession(interaction, requestId) {
   await interaction.editReply(buildGovernorGearOptimizerReplyMarkdown(result.data));
 }
 
+async function sendCharmsWizardIntro(message) {
+  const embed = new EmbedBuilder()
+    .setColor(0xe91e63)
+    .setTitle("Charms optimizer — chat wizard")
+    .setDescription(
+      `**${CHARMS_TOTAL_CHAT_STEPS} steps:** **Charm Guides** → **Charm Designs** → **18 charms** (same order as the [Charms optimizer](https://kingshotoptimizer.com/charms/optimize)).\n\n` +
+        "Reply with **one number** per message. Type **cancel** to stop.\n\n" +
+        "Or use **`/optimizecharms`** to fill everything in one slash command."
+    )
+    .addFields(
+      {
+        name: "Cavalry (6 charms)",
+        value: "Piece 1: charms 1–3\nPiece 2: charms 1–3",
+        inline: true,
+      },
+      {
+        name: "Infantry (6 charms)",
+        value: "Piece 1: charms 1–3\nPiece 2: charms 1–3",
+        inline: true,
+      },
+      {
+        name: "Archery (6 charms)",
+        value: "Piece 1: charms 1–3\nPiece 2: charms 1–3",
+        inline: true,
+      }
+    )
+    .setFooter({ text: "Questions follow in order: materials, then Cav → Inf → Arch." });
+  await message.reply({ embeds: [embed] });
+}
+
+async function askNextCharmsChatStep(message, sessionKey) {
+  const session = charmsChatSessions.get(sessionKey);
+  if (!session) return;
+  const step = CHARMS_CHAT_STEPS[session.stepIndex];
+  if (!step) return;
+  await message.reply(step.prompt);
+}
+
+async function finishCharmsChatWizard(message, sessionKey, session) {
+  await message.reply("Running **charms optimizer**…");
+  const charmLevels = {};
+  for (const key of CHARM_LEVEL_API_KEYS) {
+    const v = Number(session.data[key] ?? 0);
+    charmLevels[key] = Math.max(0, Math.min(22, Number.isFinite(v) ? Math.floor(v) : 0));
+  }
+  const result = await fetchCharmsOptimization({
+    charmGuides: session.data.charmGuides,
+    charmDesigns: session.data.charmDesigns,
+    charmLevels,
+  });
+  charmsChatSessions.delete(sessionKey);
+
+  if (!result.ok) {
+    await message.reply(
+      `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/charms/optimize>`
+    );
+    return;
+  }
+
+  let content = buildCharmsOptimizerReplyMarkdown(result.data);
+  if (content.length > 2000) {
+    content = `${content.slice(0, 1990)}…\n_(truncated — open the site for the full list.)_`;
+  }
+  await message.reply(content);
+}
+
+/** @returns {Promise<boolean>} */
+async function handleCharmsChatMessage(message) {
+  if (!message.guild || !message.content) return false;
+  if (!isGovGearAllowedContext(message.guildId, message.channelId)) return false;
+
+  const sessionKey = getGovGearChatSessionKey(message);
+  const existing = charmsChatSessions.get(sessionKey);
+
+  if (!existing) {
+    const normalized = normalizeTriggerText(message.content);
+    if (!CHARMS_CHAT_TRIGGER_PHRASES.has(normalized)) return false;
+    if (govGearChatSessions.has(sessionKey)) {
+      govGearChatSessions.delete(sessionKey);
+      await message.reply("Ending **Governor Gear** wizard — starting **Charms** wizard.");
+    }
+    charmsChatSessions.set(sessionKey, { stepIndex: 0, data: {}, createdAt: Date.now() });
+    await sendCharmsWizardIntro(message);
+    await askNextCharmsChatStep(message, sessionKey);
+    return true;
+  }
+
+  const normalized = normalizeTriggerText(message.content);
+  if (GOV_GEAR_CHAT_CANCEL_PHRASES.has(normalized)) {
+    charmsChatSessions.delete(sessionKey);
+    await message.reply("Charms wizard **cancelled**.");
+    return true;
+  }
+
+  const step = CHARMS_CHAT_STEPS[existing.stepIndex];
+  if (!step) {
+    charmsChatSessions.delete(sessionKey);
+    return true;
+  }
+
+  if (step.kind === "resource") {
+    const value = Number(message.content.trim());
+    if (!Number.isFinite(value) || value < 0) {
+      await message.reply("Please enter a valid **non-negative** whole number.");
+      await askNextCharmsChatStep(message, sessionKey);
+      return true;
+    }
+    existing.data[step.key] = Math.floor(value);
+  } else if (step.kind === "charmLevel") {
+    const raw = message.content.trim();
+    if (!/^-?\d+$/.test(raw)) {
+      await message.reply("Please send **one whole number** from **0** to **22**.");
+      await askNextCharmsChatStep(message, sessionKey);
+      return true;
+    }
+    const v = parseInt(raw, 10);
+    if (v < 0 || v > 22) {
+      await message.reply("Level must be between **0** (not started) and **22**.");
+      await askNextCharmsChatStep(message, sessionKey);
+      return true;
+    }
+    existing.data[step.key] = v;
+  }
+
+  existing.stepIndex += 1;
+  charmsChatSessions.set(sessionKey, existing);
+
+  if (existing.stepIndex >= CHARMS_CHAT_STEPS.length) {
+    await finishCharmsChatWizard(message, sessionKey, existing);
+    return true;
+  }
+
+  await askNextCharmsChatStep(message, sessionKey);
+  return true;
+}
+
 async function handleGovGearChatMessage(message) {
   if (!message.content) return;
-  if (!isGovGearAllowedChannel(message.channelId)) return;
+  if (!isGovGearAllowedContext(message.guildId, message.channelId)) return;
   const sessionKey = getGovGearChatSessionKey(message);
   const existing = govGearChatSessions.get(sessionKey);
 
   if (!existing) {
     const normalized = normalizeTriggerText(message.content);
     if (!GOV_GEAR_CHAT_TRIGGER_PHRASES.has(normalized)) return;
+    charmsChatSessions.delete(sessionKey);
     const requestId = `${message.author.id}-${Date.now()}`;
     const lastMemory = getUserGovGearMemory(message.author.id) || {};
     govGearModalSessions.set(requestId, { userId: message.author.id, data: { ...lastMemory }, createdAt: Date.now() });
@@ -1610,7 +1929,9 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   presence: {
     status: "online",
-    activities: [{ name: "/kingshot /kvkmatches /kingdomage /optimizegovgear", type: ActivityType.Watching }],
+    activities: [
+      { name: "/kingshot /kvkmatches /kingdomage /optimizegovgear /optimizecharms", type: ActivityType.Watching },
+    ],
   },
 });
 
@@ -1624,12 +1945,13 @@ client.once(Events.ClientReady, async (readyClient) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  try {
   if (interaction.isAutocomplete()) {
     if (interaction.commandName !== "optimizegovgear") {
       await interaction.respond([]);
       return;
     }
-    if (!isGovGearAllowedChannel(interaction.channelId)) {
+    if (!isGovGearAllowedContext(interaction.guildId, interaction.channelId)) {
       await interaction.respond([]);
       return;
     }
@@ -1646,7 +1968,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     (interaction.isButton() && interaction.customId.startsWith("optimizegovgear:")) ||
     (interaction.isStringSelectMenu() && interaction.customId.startsWith("optimizegovgear:")) ||
     (interaction.isModalSubmit() && interaction.customId.startsWith("optimizegovgear:"));
-  if (isOptimizeGovGearComponent && !isGovGearAllowedChannel(interaction.channelId)) {
+  if (isOptimizeGovGearComponent && !isGovGearAllowedContext(interaction.guildId, interaction.channelId)) {
     await replyGovGearWrongChannel(interaction);
     return;
   }
@@ -1984,18 +2306,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (!interaction.isChatInputCommand()) return;
-  if (!["kingshot", "kvkmatches", "kingdomage", "optimizegovgear"].includes(interaction.commandName)) return;
+  if (
+    !["kingshot", "kvkmatches", "kingdomage", "optimizegovgear", "optimizecharms"].includes(
+      interaction.commandName
+    )
+  )
+    return;
 
-  const isGovGearSlash = interaction.commandName === "optimizegovgear";
-  if (isGovGearSlash && !isGovGearAllowedChannel(interaction.channelId)) {
+  const isEphemeralOptimizerSlash =
+    interaction.commandName === "optimizegovgear" || interaction.commandName === "optimizecharms";
+  if (isEphemeralOptimizerSlash && !isGovGearAllowedContext(interaction.guildId, interaction.channelId)) {
     await interaction.reply({
-      content: `Governor gear is only available in <#${govGearChannelId}>.`,
+      content: `Optimizer commands are only available in ${formatGovGearAllowedTargetMention()}.`,
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
-  /** Public defer for Kingshot lookups (embeds + brand file); ephemeral only for governor gear wizard. */
-  await interaction.deferReply(isGovGearSlash ? { flags: MessageFlags.Ephemeral } : {});
+  /** Public defer for Kingshot lookups (embeds + brand file); ephemeral for optimizer slash commands. */
+  await interaction.deferReply(isEphemeralOptimizerSlash ? { flags: MessageFlags.Ephemeral } : {});
 
   try {
     if (interaction.commandName === "kingshot") {
@@ -2010,6 +2338,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await handleKingdomAge(interaction);
       return;
     }
+    if (interaction.commandName === "optimizecharms") {
+      await handleOptimizeCharms(interaction);
+      return;
+    }
     await handleOptimizeGovGear(interaction);
   } catch (e) {
     console.error("Command handling error:", e);
@@ -2022,6 +2354,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     }
   }
+  } catch (e) {
+    if (isUnknownInteractionError(e)) {
+      console.warn("Ignored stale interaction (Unknown interaction / 10062).");
+      return;
+    }
+    console.error("Interaction handler error:", e);
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "Unexpected error while processing the interaction.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    } catch (_) {
+      /* ignore */
+    }
+  }
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -2032,6 +2381,7 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
     if (await handlePublicApiShortcuts(message)) return;
+    if (await handleCharmsChatMessage(message)) return;
     await handleGovGearChatMessage(message);
   } catch (e) {
     console.error("Message handler error:", e);

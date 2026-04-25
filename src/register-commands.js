@@ -1,5 +1,34 @@
 require("dotenv").config();
 const { REST, Routes, SlashCommandBuilder } = require("discord.js");
+const { CHARM_LEVEL_API_KEYS } = require("./kingshot-api");
+
+function charmSlashOptionDescription(apiKey) {
+  const m = String(apiKey).match(/^(cavalry|infantry|archery)_gear_(\d)_charm_(\d)$/);
+  if (!m) return String(apiKey).slice(0, 100);
+  const troop = m[1][0].toUpperCase() + m[1].slice(1);
+  const desc = `${troop} gear ${m[2]} — charm ${m[3]} (0–22)`;
+  return desc.length > 100 ? `${desc.slice(0, 97)}...` : desc;
+}
+
+const optimizeCharmsSlash = new SlashCommandBuilder()
+  .setName("optimizecharms")
+  .setDescription("Charm upgrade plan (Kingshot Optimizer)")
+  .addIntegerOption((o) =>
+    o.setName("charm_guides").setDescription("Available Charm Guides").setRequired(true).setMinValue(0)
+  )
+  .addIntegerOption((o) =>
+    o.setName("charm_designs").setDescription("Available Charm Designs").setRequired(true).setMinValue(0)
+  );
+for (const key of CHARM_LEVEL_API_KEYS) {
+  optimizeCharmsSlash.addIntegerOption((o) =>
+    o
+      .setName(key)
+      .setDescription(charmSlashOptionDescription(key))
+      .setRequired(false)
+      .setMinValue(0)
+      .setMaxValue(22)
+  );
+}
 
 const commands = [
   new SlashCommandBuilder()
@@ -91,6 +120,7 @@ const commands = [
         .setAutocomplete(true)
     )
     .toJSON(),
+  optimizeCharmsSlash.toJSON(),
 ];
 
 async function main() {

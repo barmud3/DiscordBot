@@ -493,10 +493,153 @@ async function fetchGovernorGearOptimization(input) {
   return { ok: false, code: "OPTIMIZER_FAILED", message: lastError };
 }
 
+/** API `charmLevels` keys — order: Cav → Inf → Arch, piece 1 then 2, charms 1–3 each. */
+const CHARM_LEVEL_API_KEYS = [
+  "cavalry_gear_1_charm_1",
+  "cavalry_gear_1_charm_2",
+  "cavalry_gear_1_charm_3",
+  "cavalry_gear_2_charm_1",
+  "cavalry_gear_2_charm_2",
+  "cavalry_gear_2_charm_3",
+  "infantry_gear_1_charm_1",
+  "infantry_gear_1_charm_2",
+  "infantry_gear_1_charm_3",
+  "infantry_gear_2_charm_1",
+  "infantry_gear_2_charm_2",
+  "infantry_gear_2_charm_3",
+  "archery_gear_1_charm_1",
+  "archery_gear_1_charm_2",
+  "archery_gear_1_charm_3",
+  "archery_gear_2_charm_1",
+  "archery_gear_2_charm_2",
+  "archery_gear_2_charm_3",
+];
+
+/**
+ * @param {{
+ *   charmGuides: number,
+ *   charmDesigns: number,
+ *   charmLevels?: Record<string, number>,
+ *   troopTypeFilter?: string,
+ *   optimizationMode?: string,
+ *   maxUpgrades?: number,
+ *   weightSettings?: { enabled: boolean, profile: string, scalingAmplifier?: number },
+ * }} input
+ * @returns {Promise<{ ok: true, data: any } | { ok: false, code: string, message: string }>}
+ */
+async function fetchCharmsOptimization(input) {
+  const endpoint = "https://api.kingshotoptimizer.com/charms";
+
+  const GOVERNOR_GEAR_WEIGHT_PROFILE_IDS = new Set([
+    "combat",
+    "balance",
+    "unweighted",
+    "custom",
+    "attackTank",
+    "extremeInfantry",
+    "extremeArchery",
+    "extremeCavalry",
+    "userCustom",
+    "earlyGameGrowth",
+    "earlyGameCombat",
+    "gen4NewNormal",
+  ]);
+
+  const normalizeGovernorGearWeightProfile = (profile) => {
+    if (profile === "futureProofed") return "gen4NewNormal";
+    return profile;
+  };
+
+  const charmLevels = {};
+  for (const key of CHARM_LEVEL_API_KEYS) {
+    const raw =
+      input.charmLevels && Object.prototype.hasOwnProperty.call(input.charmLevels, key)
+        ? input.charmLevels[key]
+        : 0;
+    const v = Number(raw ?? 0);
+    charmLevels[key] = Math.max(0, Math.min(22, Number.isFinite(v) ? Math.floor(v) : 0));
+  }
+
+  const payload = {
+    resources: {
+      charmGuides: Math.max(0, Math.floor(Number(input.charmGuides || 0))),
+      charmDesigns: Math.max(0, Math.floor(Number(input.charmDesigns || 0))),
+    },
+    charmLevels,
+    troopTypeFilter: "all",
+    optimizationMode: "optimize-stats",
+    maxUpgrades: 100,
+    weightSettings: {
+      enabled: true,
+      profile: "gen4NewNormal",
+      scalingAmplifier: 1.25,
+    },
+  };
+
+  if (input.troopTypeFilter && ["all", "infantry", "cavalry", "archery"].includes(input.troopTypeFilter)) {
+    payload.troopTypeFilter = input.troopTypeFilter;
+  }
+  if (input.optimizationMode && ["optimize-stats", "optimize-events"].includes(input.optimizationMode)) {
+    payload.optimizationMode = input.optimizationMode;
+  }
+  if (Number.isFinite(Number(input.maxUpgrades)) && Number(input.maxUpgrades) > 0) {
+    payload.maxUpgrades = Math.floor(Number(input.maxUpgrades));
+  }
+  if (input.weightSettings && input.weightSettings.enabled && input.weightSettings.profile) {
+    const profile = normalizeGovernorGearWeightProfile(input.weightSettings.profile);
+    if (GOVERNOR_GEAR_WEIGHT_PROFILE_IDS.has(profile)) {
+      payload.weightSettings = {
+        enabled: true,
+        profile,
+        scalingAmplifier: Number.isFinite(Number(input.weightSettings.scalingAmplifier))
+          ? Number(input.weightSettings.scalingAmplifier)
+          : 1.25,
+      };
+    }
+  }
+
+  let res;
+  try {
+    res = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (_) {
+    return {
+      ok: false,
+      code: "OPTIMIZER_FAILED",
+      message: "Could not reach optimizer API.",
+    };
+  }
+
+  let body = null;
+  try {
+    body = await res.json();
+  } catch (_) {
+    body = null;
+  }
+
+  if (res.ok && body && body.success) {
+    return { ok: true, data: body.result ?? {} };
+  }
+
+  let lastError = `Optimizer API returned status ${res.status}.`;
+  if (body && typeof body.message === "string" && body.message.trim()) {
+    lastError = body.message;
+  } else if (body && typeof body.error === "string" && body.error.trim()) {
+    lastError = body.error;
+  }
+
+  return { ok: false, code: "OPTIMIZER_FAILED", message: lastError };
+}
+
 module.exports = {
+  CHARM_LEVEL_API_KEYS,
   fetchPlayerInfo,
   fetchKvkMatches,
   fetchKvkMatchesForKingdom,
   fetchKingdomTrackerById,
   fetchGovernorGearOptimization,
+  fetchCharmsOptimization,
 };

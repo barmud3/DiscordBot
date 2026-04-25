@@ -1,8 +1,8 @@
 {
   "749581730364522576": {
-    "updatedAt": "2026-04-24T21:50:33.645Z",
+    "updatedAt": "2026-04-25T08:19:14.478Z",
     "data": {
-      "hat": "Red T5⭐⭐⭐",
+      "hat": "Purple⭐⭐",
       "chain": "Purple⭐⭐⭐",
       "shirt": "Gold T1",
       "pants": "Gold T1",
@@ -10,7 +10,11 @@
       "baton": "Gold",
       "satin": 162277,
       "gildedThreads": 1616,
-      "artisansVision": 265
+      "artisansVision": 265,
+      "weightSettings": {
+        "enabled": true,
+        "profile": "earlyGameCombat"
+      }
     }
   },
   "1367251085168873613": {
@@ -25,6 +29,66 @@
       "satin": 1000000000,
       "gildedThreads": 9999,
       "artisansVision": 1000
+    }
+  },
+  "1204271470000341022": {
+    "updatedAt": "2026-04-24T23:05:34.474Z",
+    "data": {
+      "hat": "Purple T1",
+      "chain": "Purple T1",
+      "shirt": "Purple T1⭐⭐",
+      "pants": "Purple T1",
+      "ring": "Purple T1⭐⭐",
+      "baton": "Purple T1⭐",
+      "satin": 46899,
+      "gildedThreads": 418,
+      "artisansVision": 51
+    }
+  },
+  "430003709137780737": {
+    "updatedAt": "2026-04-25T06:34:10.644Z",
+    "data": {
+      "hat": "Gold⭐",
+      "chain": "Gold⭐",
+      "shirt": "Gold T1⭐⭐⭐",
+      "pants": "Gold T1⭐",
+      "ring": "Gold T1",
+      "baton": "Gold⭐⭐⭐",
+      "satin": 100000,
+      "gildedThreads": 1000,
+      "artisansVision": 100,
+      "weightSettings": {
+        "enabled": true,
+        "profile": "gen4NewNormal"
+      }
+    }
+  },
+  "263398946733424641": {
+    "updatedAt": "2026-04-25T08:21:00.594Z",
+    "data": {
+      "hat": "Gold T1",
+      "chain": "Gold T1",
+      "shirt": "Gold T3",
+      "pants": "Gold T2",
+      "ring": "Gold T2",
+      "baton": "Gold T1",
+      "satin": 3700000,
+      "gildedThreads": 38000,
+      "artisansVision": 6500
+    }
+  },
+  "766332137220866079": {
+    "updatedAt": "2026-04-25T08:38:47.428Z",
+    "data": {
+      "hat": "Gold T3",
+      "chain": "Gold T3",
+      "shirt": "Gold T3",
+      "pants": "Gold T3",
+      "ring": "Gold T3",
+      "baton": "Gold T3",
+      "satin": 241000,
+      "gildedThreads": 2400,
+      "artisansVision": 650
     }
   }
 }
