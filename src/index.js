@@ -25,6 +25,8 @@ const {
   fetchPlayerInfo,
   fetchKvkMatchesForKingdom,
   fetchKingdomTrackerById,
+  fetchTransferWindows,
+  fetchTransferHistoryForKingdom,
   fetchGovernorGearOptimization,
   fetchCharmsOptimization,
   CHARM_LEVEL_API_KEYS,
@@ -163,9 +165,18 @@ async function replyGovGearWrongChannel(interaction) {
   }
 }
 
-function isUnknownInteractionError(error) {
-  const code = Number(error?.code ?? error?.rawError?.code);
-  return code === 10062;
+function getDiscordApiErrorCode(error) {
+  const raw = error?.code ?? error?.rawError?.code;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Expired token / old component (10062) or duplicate ack race (40060). */
+function isIgnorableInteractionResponseError(error) {
+  const code = getDiscordApiErrorCode(error);
+  if (code === 10062 || code === 40060) return true;
+  const msg = String(error?.message || error?.rawError?.message || "");
+  return msg.includes("Unknown interaction") || msg.includes("already been acknowledged");
 }
 
 if (!token || !clientId) {
@@ -222,6 +233,16 @@ const commands = [
         .setName("kingdom_id")
         .setDescription("Kingdom ID (example: 220)")
         .setRequired(true)
+    ),
+  new SlashCommandBuilder()
+    .setName("transfers")
+    .setDescription("Show past and upcoming kingdom transfer windows")
+    .addIntegerOption((o) =>
+      o
+        .setName("kingdom_id")
+        .setDescription("Optional kingdom ID for last-leading transfer hint")
+        .setRequired(false)
+        .setMinValue(1)
     ),
   new SlashCommandBuilder()
     .setName("optimizegovgear")
@@ -1399,6 +1420,22 @@ async function handlePublicApiShortcuts(message) {
     return true;
   }
 
+  // Transfers shortcuts: "transfer 210" or "טרנספר 210"
+  const transferMatch = text.match(/^(?:transfer|טרנספר)\s+(\d+)\s*$/iu);
+  if (transferMatch) {
+    const kingdomId = parseInt(transferMatch[1], 10);
+    if (!Number.isFinite(kingdomId) || kingdomId <= 0) return false;
+    const res = await fetchTransferWindows({ kingdomId });
+    if (!res.ok) {
+      await message.reply(res.message || "Could not fetch transfer windows right now.");
+      return true;
+    }
+    const hist = await fetchTransferHistoryForKingdom({ kingdomId });
+    const content = buildTransferReplyContent({ kingdomId, windowsRes: res, historyRes: hist });
+    await message.reply(content);
+    return true;
+  }
+
   // KvK: message is only digits, 1–4 digits (e.g. 210). Player IDs use the 5–20 rule below.
   if (/^\d+$/.test(text)) {
     if (text.length >= 5 && text.length <= 20) {
@@ -1498,6 +1535,108 @@ async function handleKingdomAge(interaction) {
   }
 
   await interaction.editReply(buildEmbedReplyPayload([buildKingdomAgePazamEmbed(res.data || {})]));
+}
+
+function parseTransferDateLabel(label) {
+  const t = Date.parse(String(label || "").trim());
+  return Number.isFinite(t) ? t : NaN;
+}
+
+/** Parse date from optimizer window text, e.g. `Transfer 6 – Jun 7, 2026`. */
+function parseOptimizerTransferWindowDate(label) {
+  const m = String(label || "").match(/[–-]\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})/);
+  if (!m) return NaN;
+  return Date.parse(m[1]);
+}
+
+function buildTransferReplyContent({ kingdomId, windowsRes, historyRes }) {
+  let content = `**Transfer history**`;
+  if (Number.isFinite(kingdomId) && kingdomId > 0) {
+    content += ` for Kingdom #${kingdomId}`;
+  }
+  content += `\n\n`;
+
+  const now = Date.now();
+  const futureLabels = Array.isArray(windowsRes?.data?.future) ? windowsRes.data.future : [];
+  const nextOptimizer = futureLabels
+    .map((l) => ({ label: l, ts: parseOptimizerTransferWindowDate(l) }))
+    .filter((x) => Number.isFinite(x.ts) && x.ts >= now)
+    .sort((a, b) => a.ts - b.ts)[0];
+
+  if (nextOptimizer) {
+    content += `**Upcoming transfer:** ${nextOptimizer.label}\n`;
+    if (Number.isFinite(kingdomId) && kingdomId > 0 && historyRes?.ok) {
+      const parts = historyRes.data.participation || [];
+      const withTs = parts.map((p) => ({ ...p, _ts: parseTransferDateLabel(p.window) }));
+      const futureParts = withTs.filter((p) => Number.isFinite(p._ts) && p._ts >= now);
+      let nextPart = null;
+      if (futureParts.length) {
+        const t0 = nextOptimizer.ts;
+        const sameDay = futureParts.find((p) => Math.abs(p._ts - t0) < 86400000);
+        nextPart =
+          sameDay ||
+          futureParts.slice().sort((a, b) => Math.abs(a._ts - t0) - Math.abs(b._ts - t0))[0];
+      }
+      if (nextPart) {
+        content += `**Kingdom #${kingdomId} (this window):** Group ${nextPart.group} (${nextPart.rangeStart}–${nextPart.rangeEnd}) · ${nextPart.progress || "N/A"}\n`;
+      } else {
+        content += `**Kingdom #${kingdomId} (this window):** group/range not found in transfer history for the next window.\n`;
+      }
+    } else if (Number.isFinite(kingdomId) && kingdomId > 0) {
+      content += `**Kingdom #${kingdomId} (this window):** (transfer history unavailable)\n`;
+    }
+    content += `\n`;
+  } else if (futureLabels.length) {
+    content += `**Upcoming transfer:** (date could not be parsed)\n\n`;
+  } else if (Number.isFinite(kingdomId) && kingdomId > 0 && historyRes?.ok) {
+    const parts = historyRes.data.participation || [];
+    const withTs = parts.map((p) => ({ ...p, _ts: parseTransferDateLabel(p.window) }));
+    const fp = withTs
+      .filter((p) => Number.isFinite(p._ts) && p._ts >= now)
+      .sort((a, b) => a._ts - b._ts)[0];
+    if (fp) {
+      content += `**Upcoming transfer:** ${fp.window}\n`;
+      content += `**Kingdom #${kingdomId} (this window):** Group ${fp.group} (${fp.rangeStart}–${fp.rangeEnd}) · ${fp.progress || "N/A"}\n\n`;
+    }
+  }
+
+  if (historyRes?.ok) {
+    const withTs = (historyRes.data.participation || [])
+      .map((x) => ({ ...x, _ts: parseTransferDateLabel(x.window) }))
+      .filter((x) => Number.isFinite(x._ts));
+    const pastRows = withTs.filter((x) => x._ts < now).sort((a, b) => b._ts - a._ts);
+    const fmtRow = (x) =>
+      `- ${x.window} · Group ${x.group} (${x.rangeStart}–${x.rangeEnd}) · ${x.progress || "N/A"}`;
+
+    content += `**Num of transfers so far:** ${pastRows.length}\n\n`;
+    content += `**Past:**\n`;
+    content += pastRows.length ? pastRows.map(fmtRow).join("\n") : "- (none)";
+  } else {
+    content += `**Num of transfers so far:** 0\n\n`;
+    content += `**Past:**\n- ${historyRes?.message || "Could not load transfer history."}`;
+  }
+
+  if (content.length > 1950) {
+    content = `${content.slice(0, 1940)}\n...`;
+  }
+  return content;
+}
+
+async function handleTransfers(interaction) {
+  const kingdomId = interaction.options.getInteger("kingdom_id");
+  const res = await fetchTransferWindows({ kingdomId: kingdomId ?? undefined });
+  if (!res.ok) {
+    await interaction.editReply({
+      content: res.message || "Could not fetch transfer windows right now.",
+    });
+    return;
+  }
+  const hist =
+    Number.isFinite(kingdomId) && kingdomId > 0
+      ? await fetchTransferHistoryForKingdom({ kingdomId })
+      : { ok: true, data: { participation: [], windows: [] } };
+  const content = buildTransferReplyContent({ kingdomId, windowsRes: res, historyRes: hist });
+  await interaction.editReply({ content });
 }
 
 async function handleOptimizeGovGear(interaction) {
@@ -1602,18 +1741,31 @@ async function handleGovGearSubmitButton(interaction) {
   }
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  rememberUserGovGearMemory(interaction.user.id, pending.data);
-  const result = await fetchGovernorGearOptimization(pending.data);
-  pendingGovGearSubmissions.delete(requestId);
+  try {
+    rememberUserGovGearMemory(interaction.user.id, pending.data);
+    const result = await fetchGovernorGearOptimization(pending.data);
+    pendingGovGearSubmissions.delete(requestId);
 
-  if (!result.ok) {
-    await interaction.editReply(
-      `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/governor-gear/optimize>`
-    );
-    return;
+    if (!result.ok) {
+      await interaction.editReply(
+        `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/governor-gear/optimize>`
+      );
+      return;
+    }
+
+    await interaction.editReply(buildGovernorGearOptimizerReplyMarkdown(result.data));
+  } catch (e) {
+    pendingGovGearSubmissions.delete(requestId);
+    if (isIgnorableInteractionResponseError(e)) throw e;
+    console.error("Governor gear submit (button) failed:", e);
+    try {
+      await interaction.editReply({
+        content: "Unexpected error while contacting the optimizer. Try again or use <https://kingshotoptimizer.com/governor-gear/optimize>.",
+      });
+    } catch (_) {
+      /* interaction may be gone */
+    }
   }
-
-  await interaction.editReply(buildGovernorGearOptimizerReplyMarkdown(result.data));
 }
 
 function buildGovGearModalOne(requestId, defaults = {}) {
@@ -1855,14 +2007,26 @@ async function submitGovGearModalSession(interaction, requestId) {
   rememberUserGovGearMemory(interaction.user.id, pending.data);
   govGearModalSessions.delete(requestId);
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const result = await fetchGovernorGearOptimization(pending.data);
-  if (!result.ok) {
-    await interaction.editReply(
-      `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/governor-gear/optimize>`
-    );
-    return;
+  try {
+    const result = await fetchGovernorGearOptimization(pending.data);
+    if (!result.ok) {
+      await interaction.editReply(
+        `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/governor-gear/optimize>`
+      );
+      return;
+    }
+    await interaction.editReply(buildGovernorGearOptimizerReplyMarkdown(result.data));
+  } catch (e) {
+    if (isIgnorableInteractionResponseError(e)) throw e;
+    console.error("Governor gear submit (panel) failed:", e);
+    try {
+      await interaction.editReply({
+        content: "Unexpected error while contacting the optimizer. Try again or use <https://kingshotoptimizer.com/governor-gear/optimize>.",
+      });
+    } catch (_) {
+      /* interaction may be gone */
+    }
   }
-  await interaction.editReply(buildGovernorGearOptimizerReplyMarkdown(result.data));
 }
 
 function charmLevelLabel(level) {
@@ -2181,7 +2345,10 @@ const client = new Client({
   presence: {
     status: "online",
     activities: [
-      { name: "/kingshot /kvkmatches /kingdomage /optimizegovgear /optimizecharms", type: ActivityType.Watching },
+      {
+        name: "/kingshot /kvkmatches /kingdomage /transfers /optimizegovgear /optimizecharms",
+        type: ActivityType.Watching,
+      },
     ],
   },
 });
@@ -2391,24 +2558,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-      const result = await fetchCharmsOptimization({
-        charmGuides: Number(session.data.charmGuides ?? 0),
-        charmDesigns: Number(session.data.charmDesigns ?? 0),
-        charmLevels: buildCharmsLevelsPayloadFromSession(session.data),
-      });
-      rememberUserCharmsMemory(interaction.user.id, session.data);
-      charmsPanelSessions.delete(requestId);
-      if (!result.ok) {
-        await interaction.editReply(
-          `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/charms/optimize>`
-        );
-        return;
+      try {
+        const result = await fetchCharmsOptimization({
+          charmGuides: Number(session.data.charmGuides ?? 0),
+          charmDesigns: Number(session.data.charmDesigns ?? 0),
+          charmLevels: buildCharmsLevelsPayloadFromSession(session.data),
+        });
+        rememberUserCharmsMemory(interaction.user.id, session.data);
+        charmsPanelSessions.delete(requestId);
+        if (!result.ok) {
+          await interaction.editReply(
+            `${result.message}\nYou can still optimize manually at <https://kingshotoptimizer.com/charms/optimize>`
+          );
+          return;
+        }
+        let content = buildCharmsOptimizerReplyMarkdown(result.data);
+        if (content.length > 2000) {
+          content = `${content.slice(0, 1990)}…\n_(truncated — open the site for the full list.)_`;
+        }
+        await interaction.editReply(content);
+      } catch (e) {
+        charmsPanelSessions.delete(requestId);
+        if (isIgnorableInteractionResponseError(e)) throw e;
+        console.error("Charms submit failed:", e);
+        try {
+          await interaction.editReply({
+            content: "Unexpected error while contacting the optimizer. Try again or use <https://kingshotoptimizer.com/charms/optimize>.",
+          });
+        } catch (_) {
+          /* interaction may be gone */
+        }
       }
-      let content = buildCharmsOptimizerReplyMarkdown(result.data);
-      if (content.length > 2000) {
-        content = `${content.slice(0, 1990)}…\n_(truncated — open the site for the full list.)_`;
-      }
-      await interaction.editReply(content);
       return;
     }
 
@@ -2847,7 +3027,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (!interaction.isChatInputCommand()) return;
   if (
-    !["kingshot", "kvkmatches", "kingdomage", "optimizegovgear", "optimizecharms"].includes(
+    !["kingshot", "kvkmatches", "kingdomage", "transfers", "optimizegovgear", "optimizecharms"].includes(
       interaction.commandName
     )
   )
@@ -2878,6 +3058,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await handleKingdomAge(interaction);
       return;
     }
+    if (interaction.commandName === "transfers") {
+      await handleTransfers(interaction);
+      return;
+    }
     if (interaction.commandName === "optimizecharms") {
       await handleOptimizeCharms(interaction);
       return;
@@ -2895,8 +3079,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
   } catch (e) {
-    if (isUnknownInteractionError(e)) {
-      console.warn("Ignored stale interaction (Unknown interaction / 10062).");
+    if (isIgnorableInteractionResponseError(e)) {
+      console.warn("Ignored interaction response error (expired token or duplicate ack).");
       return;
     }
     console.error("Interaction handler error:", e);

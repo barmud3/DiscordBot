@@ -30,6 +30,10 @@ const kvkCache = new Map();
 const KVK_CACHE_TTL_MS = 60_000;
 const kingdomCache = new Map();
 const KINGDOM_CACHE_TTL_MS = 60_000;
+const transferCache = new Map();
+const TRANSFER_CACHE_TTL_MS = 5 * 60_000;
+const transferHistoryCache = new Map();
+const TRANSFER_HISTORY_CACHE_TTL_MS = 10 * 60_000;
 
 /**
  * @param {string} playerId
@@ -634,6 +638,174 @@ async function fetchCharmsOptimization(input) {
   return { ok: false, code: "OPTIMIZER_FAILED", message: lastError };
 }
 
+/**
+ * Fetch transfer windows and optional kingdom "last leading transfer" hint from
+ * Kingshot Optimizer transfer page text/HTML.
+ *
+ * @param {{ kingdomId?: number }} options
+ * @returns {Promise<{ ok: true, data: { windows: string[], future: string[], past: string[], kingdomLastLeading?: string|null } } | { ok: false, code: string, message: string }>}
+ */
+async function fetchTransferWindows(options = {}) {
+  const kingdomId = Number(options.kingdomId);
+  const cacheKey = Number.isFinite(kingdomId) && kingdomId > 0 ? `k:${kingdomId}` : "all";
+  const cached = transferCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < TRANSFER_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data };
+  }
+
+  const url = "https://kingshotoptimizer.com/kvk-rankings/transfers";
+  let res;
+  try {
+    res = await fetch(url, { headers: { Accept: "text/html,application/xhtml+xml,text/plain,*/*" } });
+  } catch (_) {
+    return {
+      ok: false,
+      code: "NETWORK",
+      message: "Could not reach Kingshot Optimizer transfers page.",
+    };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      code: "BAD_RESPONSE",
+      message: `Transfers page returned status ${res.status}.`,
+    };
+  }
+  const text = await res.text();
+  const cleaned = String(text || "").replace(/\s+/g, " ").trim();
+
+  const windowMatches = Array.from(
+    cleaned.matchAll(/Transfer\s+\d+\s*[–-]\s*[A-Za-z]{3}\s+\d{1,2},\s+\d{4}/g)
+  ).map((m) => m[0].replace(/\s+/g, " ").trim());
+  const uniqueWindows = Array.from(new Set(windowMatches));
+  const now = Date.now();
+  const parseWindowDate = (label) => {
+    const m = label.match(/[–-]\s*([A-Za-z]{3}\s+\d{1,2},\s+\d{4})/);
+    if (!m) return NaN;
+    return Date.parse(m[1]);
+  };
+  const sorted = uniqueWindows
+    .map((label) => ({ label, ts: parseWindowDate(label) }))
+    .sort((a, b) => (Number.isNaN(b.ts) ? -1 : b.ts) - (Number.isNaN(a.ts) ? -1 : a.ts));
+  const future = sorted.filter((x) => !Number.isNaN(x.ts) && x.ts >= now).map((x) => x.label);
+  const past = sorted.filter((x) => !Number.isNaN(x.ts) && x.ts < now).map((x) => x.label);
+
+  let kingdomLastLeading = null;
+  if (Number.isFinite(kingdomId) && kingdomId > 0) {
+    const kk = `KK${Math.floor(kingdomId)}`;
+    const idx = cleaned.indexOf(kk);
+    if (idx >= 0) {
+      const segment = cleaned.slice(idx, Math.min(cleaned.length, idx + 380));
+      const lm = segment.match(/(Transfer\s+\d+\s*[–-]\s*[A-Za-z]{3}\s+\d{1,2},\s+\d{4}|Never)/i);
+      if (lm) kingdomLastLeading = lm[1];
+    }
+  }
+
+  const data = {
+    windows: sorted.map((x) => x.label),
+    future,
+    past,
+    kingdomLastLeading,
+  };
+  transferCache.set(cacheKey, { at: Date.now(), data });
+  return { ok: true, data };
+}
+
+/**
+ * Parse transfer-history page and map transfer group/range/progress for a kingdom.
+ *
+ * @param {{ kingdomId: number }} options
+ * @returns {Promise<{ ok: true, data: { kingdomId: number, participation: Array<{ window: string, group: number, rangeStart: number, rangeEnd: number, progress: string }>, windows: string[] } } | { ok: false, code: string, message: string }>}
+ */
+async function fetchTransferHistoryForKingdom(options) {
+  const kingdomId = Number(options?.kingdomId);
+  if (!Number.isFinite(kingdomId) || kingdomId <= 0) {
+    return { ok: false, code: "BAD_REQUEST", message: "Invalid kingdom ID." };
+  }
+  const cacheKey = String(Math.floor(kingdomId));
+  const cached = transferHistoryCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < TRANSFER_HISTORY_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data };
+  }
+
+  const url = "https://kingshot.net/transfer-history";
+  let res;
+  try {
+    res = await fetch(url, { headers: { Accept: "text/html,application/xhtml+xml,text/plain,*/*" } });
+  } catch (_) {
+    return { ok: false, code: "NETWORK", message: "Could not reach kingshot.net transfer history." };
+  }
+  if (!res.ok) {
+    return { ok: false, code: "BAD_RESPONSE", message: `Transfer history page returned status ${res.status}.` };
+  }
+  const html = await res.text();
+  const cleaned = String(html || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const dateRe = /([A-Z][a-z]+ \d{1,2}, \d{4})/g;
+  const windows = [];
+  let dm;
+  while ((dm = dateRe.exec(cleaned))) {
+    const label = dm[1];
+    // Keep only likely transfer windows around "Ends on"/"Groups" vicinity.
+    const slice = cleaned.slice(Math.max(0, dm.index - 30), Math.min(cleaned.length, dm.index + 220));
+    if (/Ends on|Groups|Transfer Preview/i.test(slice)) {
+      windows.push({ label, idx: dm.index });
+    }
+  }
+  const uniq = [];
+  const seen = new Set();
+  for (const x of windows) {
+    if (seen.has(x.label)) continue;
+    seen.add(x.label);
+    uniq.push(x);
+  }
+
+  const participation = [];
+  for (let i = 0; i < uniq.length; i += 1) {
+    const start = uniq[i].idx;
+    const end = i + 1 < uniq.length ? uniq[i + 1].idx : cleaned.length;
+    const seg = cleaned.slice(start, end);
+
+    const groupRe = /Group\s+(\d+)\s+(\d+)\s*-\s*(\d+)([\s\S]*?)(?=Group\s+\d+\s+\d+\s*-\s*\d+|$)/g;
+    let gm;
+    while ((gm = groupRe.exec(seg))) {
+      const group = Number(gm[1]);
+      const rangeStart = Number(gm[2]);
+      const rangeEnd = Number(gm[3]);
+      if (!Number.isFinite(group) || !Number.isFinite(rangeStart) || !Number.isFinite(rangeEnd)) continue;
+      if (kingdomId < rangeStart || kingdomId > rangeEnd) continue;
+      const tail = gm[4] || "";
+      let progress = "N/A";
+      const pm = tail.match(/Kingdom Progress\s+([\s\S]*?)(?:View Details|Leading Kingdoms|Group\s+\d+|$)/i);
+      if (pm && pm[1]) {
+        progress = pm[1].replace(/\s+/g, " ").trim();
+      }
+      participation.push({
+        window: uniq[i].label,
+        group,
+        rangeStart,
+        rangeEnd,
+        progress,
+      });
+    }
+  }
+
+  const data = {
+    kingdomId: Math.floor(kingdomId),
+    participation,
+    windows: uniq.map((x) => x.label),
+  };
+  transferHistoryCache.set(cacheKey, { at: Date.now(), data });
+  return { ok: true, data };
+}
+
 module.exports = {
   CHARM_LEVEL_API_KEYS,
   fetchPlayerInfo,
@@ -642,4 +814,6 @@ module.exports = {
   fetchKingdomTrackerById,
   fetchGovernorGearOptimization,
   fetchCharmsOptimization,
+  fetchTransferWindows,
+  fetchTransferHistoryForKingdom,
 };

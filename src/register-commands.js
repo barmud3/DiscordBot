@@ -62,6 +62,17 @@ const commands = [
     )
     .toJSON(),
   new SlashCommandBuilder()
+    .setName("transfers")
+    .setDescription("Show past and upcoming kingdom transfer windows")
+    .addIntegerOption((o) =>
+      o
+        .setName("kingdom_id")
+        .setDescription("Optional kingdom ID for last-leading transfer hint")
+        .setRequired(false)
+        .setMinValue(1)
+    )
+    .toJSON(),
+  new SlashCommandBuilder()
     .setName("optimizegovgear")
     .setDescription("Prepare governor gear optimization request")
     .addIntegerOption((o) =>

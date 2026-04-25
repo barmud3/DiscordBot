@@ -1,0 +1,85 @@
+{
+  "guide_popup": {
+    "x": 0.075,
+    "y": 0.215,
+    "w": 0.85,
+    "h": 0.61
+  },
+  "guide_rows": {
+    "start_y": 0.145,
+    "end_y": 0.985,
+    "count": 6
+  },
+  "guide_cols": {
+    "start_x": 0.31,
+    "spacing": 0.193,
+    "w": 0.115,
+    "h": 0.085,
+    "y_offset": 0.02
+  },
+  "profile_charms": {
+    "icon_w": 0.042,
+    "icon_h": 0.026,
+    "spacing_x": 0.053,
+    "row_crop_width_scale": 1.0,
+    "row_crop_height_scale": 1.1,
+    "cell_crop_width_scale": 0.92,
+    "cell_crop_height_scale": 1.0,
+    "cloth_anchors": {
+      "cavalry_gear_1": {
+        "x": 0.125,
+        "y": 0.292
+      },
+      "cavalry_gear_2": {
+        "x": 0.742,
+        "y": 0.292
+      },
+      "infantry_gear_1": {
+        "x": 0.125,
+        "y": 0.421
+      },
+      "infantry_gear_2": {
+        "x": 0.742,
+        "y": 0.421
+      },
+      "archery_gear_1": {
+        "x": 0.125,
+        "y": 0.551
+      },
+      "archery_gear_2": {
+        "x": 0.742,
+        "y": 0.551
+      }
+    },
+    "row_centers_percent": {
+      "top_left": {
+        "x": 0.166667,
+        "y": 0.29876
+      },
+      "middle_left": {
+        "x": 0.098039,
+        "y": 0.413754
+      },
+      "bottom_left": {
+        "x": 0.171569,
+        "y": 0.519729
+      },
+      "top_right": {
+        "x": 0.828431,
+        "y": 0.29876
+      },
+      "middle_right": {
+        "x": 0.892157,
+        "y": 0.409245
+      },
+      "bottom_right": {
+        "x": 0.835784,
+        "y": 0.519729
+      }
+    }
+  },
+  "confidence": {
+    "min_score": 0.42,
+    "min_margin": 0.06
+  }
+}
