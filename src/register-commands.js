@@ -73,6 +73,7 @@ const commands = [
     )
     .toJSON(),
   new SlashCommandBuilder().setName("quote").setDescription("מי אמר את זה?").toJSON(),
+  new SlashCommandBuilder().setName("quotescore").setDescription("טבלת ניקוד למשחק מי אמר את זה").toJSON(),
   new SlashCommandBuilder()
     .setName("optimizegovgear")
     .setDescription("Prepare governor gear optimization request")

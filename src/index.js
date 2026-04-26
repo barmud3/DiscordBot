@@ -249,6 +249,7 @@ const commands = [
         .setMinValue(1)
     ),
   new SlashCommandBuilder().setName("quote").setDescription("מי אמר את זה?"),
+  new SlashCommandBuilder().setName("quotescore").setDescription("טבלת ניקוד למשחק מי אמר את זה"),
   new SlashCommandBuilder()
     .setName("optimizegovgear")
     .setDescription("Prepare governor gear optimization request")
@@ -376,6 +377,7 @@ const charmsPanelSessions = new Map();
 const govGearModalSessions = new Map();
 const GOV_GEAR_MEMORY_FILE = path.resolve(__dirname, "..", "data", "govgear-user-memory.json");
 const CHARMS_MEMORY_FILE = path.resolve(__dirname, "..", "data", "charms-user-memory.json");
+const QUOTE_SCOREBOARD_FILE = path.resolve(__dirname, "..", "data", "quote-scoreboard.json");
 const GOV_GEAR_CHAT_TRIGGER_PHRASES = new Set([
   "gov gear",
   "government gear",
@@ -937,6 +939,62 @@ function rememberUserCharmsMemory(userId, data) {
     data,
   };
   saveCharmsMemoryStore(store);
+}
+
+function loadQuoteScoreboardStore() {
+  try {
+    if (!fs.existsSync(QUOTE_SCOREBOARD_FILE)) return {};
+    const raw = fs.readFileSync(QUOTE_SCOREBOARD_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveQuoteScoreboardStore(store) {
+  try {
+    const dir = path.dirname(QUOTE_SCOREBOARD_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(QUOTE_SCOREBOARD_FILE, JSON.stringify(store, null, 2), "utf8");
+  } catch (_) {
+    // ignore persistence failures
+  }
+}
+
+function addQuoteScorePoint(userId, displayName, delta = 1) {
+  const key = String(userId || "");
+  if (!key) return 0;
+  const store = loadQuoteScoreboardStore();
+  const prev = store[key] && typeof store[key] === "object" ? store[key] : { points: 0 };
+  const points = Number(prev.points) || 0;
+  const nextPoints = points + Number(delta || 0);
+  store[key] = {
+    points: nextPoints,
+    lastDisplayName: String(displayName || prev.lastDisplayName || key),
+    updatedAt: new Date().toISOString(),
+  };
+  saveQuoteScoreboardStore(store);
+  return nextPoints;
+}
+
+function buildQuoteScoreboardEmbed() {
+  const store = loadQuoteScoreboardStore();
+  const rows = Object.entries(store)
+    .map(([userId, value]) => {
+      const points = Number(value?.points) || 0;
+      const name = String(value?.lastDisplayName || userId);
+      return { userId, name, points };
+    })
+    .filter((x) => x.points > 0)
+    .sort((a, b) => b.points - a.points || a.name.localeCompare(b.name))
+    .slice(0, 15);
+
+  const description = rows.length
+    ? rows.map((r, i) => `${i + 1}. ${r.name} — **${r.points}**`).join("\n")
+    : "עדיין אין ניקוד. תתחילו לשחק 🎮";
+
+  return new EmbedBuilder().setColor(0xf1c40f).setTitle("🏆 טבלת ניקוד - מי אמר את זה?").setDescription(description);
 }
 
 function parseRequestIdFromCustomId(customId, expectedPrefix) {
@@ -1910,6 +1968,18 @@ async function handleQuoteCommand(interaction) {
   await interaction.reply({ embeds: [embed], components: rows });
 }
 
+async function handleQuoteScoreCommand(interaction) {
+  if (!gameChannelId) {
+    await interaction.reply({ content: "המשחק עדיין לא מוגדר בערוץ ייעודי.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  if (interaction.channelId !== gameChannelId) {
+    await interaction.reply({ content: "טבלת הניקוד זמינה רק בערוץ המשחק 🎮", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  await interaction.reply({ embeds: [buildQuoteScoreboardEmbed()] });
+}
+
 async function startQuoteGameInMessage(message) {
   if (!gameChannelId || !sourceChannelId) return false;
   if (message.channelId !== gameChannelId) return false;
@@ -2813,7 +2883,7 @@ const client = new Client({
     status: "online",
     activities: [
       {
-        name: "/kingshot /kvkmatches /kingdomage /transfers /quote /optimizegovgear /optimizecharms",
+        name: "/kingshot /kvkmatches /kingdomage /transfers /quote /quotescore /optimizegovgear /optimizecharms",
         type: ActivityType.Watching,
       },
     ],
@@ -2891,17 +2961,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       const rows = buildDisabledQuoteRows(interaction.message);
       const isCorrect = selectedUserId === correctUserId;
+      const totalPoints = addQuoteScorePoint(interaction.user.id, clickerName, isCorrect ? 1 : -1);
       const resultText = buildPublicQuoteResultMessage({
         clickerName,
         selectedName,
         isCorrect,
         correctName: correctUsername,
       });
+      const finalText = `${resultText}\n🏅 <@${interaction.user.id}> — סה"כ נקודות: **${totalPoints}**`;
       await interaction.update({
         components: rows,
       });
       await interaction.channel.send({
-        content: resultText,
+        content: finalText,
         reply: { messageReference: interaction.message.id },
         allowedMentions: { repliedUser: false },
       });
@@ -2936,17 +3008,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       const rows = buildDisabledQuoteRows(interaction.message);
       const isCorrect = selectedUserId === correctUserId;
+      const totalPoints = addQuoteScorePoint(interaction.user.id, clickerName, isCorrect ? 1 : -1);
       const resultText = buildPublicQuoteResultMessage({
         clickerName,
         selectedName,
         isCorrect,
         correctName: correctUsername,
       });
+      const finalText = `${resultText}\n🏅 <@${interaction.user.id}> — סה"כ נקודות: **${totalPoints}**`;
       await interaction.update({
         components: rows,
       });
       await interaction.channel.send({
-        content: resultText,
+        content: finalText,
         reply: { messageReference: interaction.message.id },
         allowedMentions: { repliedUser: false },
       });
@@ -3584,14 +3658,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (!interaction.isChatInputCommand()) return;
   if (
-    !["kingshot", "kvkmatches", "kingdomage", "transfers", "quote", "optimizegovgear", "optimizecharms"].includes(
-      interaction.commandName
-    )
+    ![
+      "kingshot",
+      "kvkmatches",
+      "kingdomage",
+      "transfers",
+      "quote",
+      "quotescore",
+      "optimizegovgear",
+      "optimizecharms",
+    ].includes(interaction.commandName)
   )
     return;
 
   if (interaction.commandName === "quote") {
     await handleQuoteCommand(interaction);
+    return;
+  }
+  if (interaction.commandName === "quotescore") {
+    await handleQuoteScoreCommand(interaction);
     return;
   }
 
@@ -3662,6 +3747,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   try {
+    if (message.channelId === gameChannelId && normalizeTriggerText(message.content) === "ניקוד") {
+      await message.reply({ embeds: [buildQuoteScoreboardEmbed()] });
+      return;
+    }
     if (await startImageQuoteGameInMessage(message)) return;
     if (await startQuoteGameInMessage(message)) return;
     if (message.guild && enableNicknameChannel && message.channelId === nicknameChannelId) {
