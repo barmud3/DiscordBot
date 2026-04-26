@@ -378,6 +378,7 @@ const govGearModalSessions = new Map();
 const GOV_GEAR_MEMORY_FILE = path.resolve(__dirname, "..", "data", "govgear-user-memory.json");
 const CHARMS_MEMORY_FILE = path.resolve(__dirname, "..", "data", "charms-user-memory.json");
 const QUOTE_SCOREBOARD_FILE = path.resolve(__dirname, "..", "data", "quote-scoreboard.json");
+const QUOTE_GAME_WIN_POINTS = 10;
 const GOV_GEAR_CHAT_TRIGGER_PHRASES = new Set([
   "gov gear",
   "government gear",
@@ -964,7 +965,7 @@ function saveQuoteScoreboardStore(store) {
 
 function addQuoteScorePoint(userId, displayName, delta = 1) {
   const key = String(userId || "");
-  if (!key) return 0;
+  if (!key) return { totalPoints: 0, reachedWin: false };
   const store = loadQuoteScoreboardStore();
   const prev = store[key] && typeof store[key] === "object" ? store[key] : { points: 0 };
   const points = Number(prev.points) || 0;
@@ -974,8 +975,13 @@ function addQuoteScorePoint(userId, displayName, delta = 1) {
     lastDisplayName: String(displayName || prev.lastDisplayName || key),
     updatedAt: new Date().toISOString(),
   };
+  const reachedWin = nextPoints >= QUOTE_GAME_WIN_POINTS;
+  if (reachedWin) {
+    saveQuoteScoreboardStore({});
+    return { totalPoints: nextPoints, reachedWin: true };
+  }
   saveQuoteScoreboardStore(store);
-  return nextPoints;
+  return { totalPoints: nextPoints, reachedWin: false };
 }
 
 function buildQuoteScoreboardEmbed() {
@@ -2961,14 +2967,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       const rows = buildDisabledQuoteRows(interaction.message);
       const isCorrect = selectedUserId === correctUserId;
-      const totalPoints = addQuoteScorePoint(interaction.user.id, clickerName, isCorrect ? 1 : -1);
+      const scoreUpdate = addQuoteScorePoint(interaction.user.id, clickerName, isCorrect ? 1 : -1);
       const resultText = buildPublicQuoteResultMessage({
         clickerName,
         selectedName,
         isCorrect,
         correctName: correctUsername,
       });
-      const finalText = `${resultText}\n🏅 <@${interaction.user.id}> — סה"כ נקודות: **${totalPoints}**`;
+      const finalText = `${resultText}\n🏅 <@${interaction.user.id}> — סה"כ נקודות: **${scoreUpdate.totalPoints}**`;
       await interaction.update({
         components: rows,
       });
@@ -2977,6 +2983,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         reply: { messageReference: interaction.message.id },
         allowedMentions: { repliedUser: false },
       });
+      if (scoreUpdate.reachedWin) {
+        await interaction.channel.send({
+          content: `🏆 המשחק הסתיים! <@${interaction.user.id}> הגיע ל-${QUOTE_GAME_WIN_POINTS} נקודות וניצח!\n🔄 הניקוד אופס ומתחילים סבב חדש.`,
+        });
+      }
       return;
     }
     if (interaction.customId.startsWith("quotegame:")) {
@@ -3008,14 +3019,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
       const rows = buildDisabledQuoteRows(interaction.message);
       const isCorrect = selectedUserId === correctUserId;
-      const totalPoints = addQuoteScorePoint(interaction.user.id, clickerName, isCorrect ? 1 : -1);
+      const scoreUpdate = addQuoteScorePoint(interaction.user.id, clickerName, isCorrect ? 1 : -1);
       const resultText = buildPublicQuoteResultMessage({
         clickerName,
         selectedName,
         isCorrect,
         correctName: correctUsername,
       });
-      const finalText = `${resultText}\n🏅 <@${interaction.user.id}> — סה"כ נקודות: **${totalPoints}**`;
+      const finalText = `${resultText}\n🏅 <@${interaction.user.id}> — סה"כ נקודות: **${scoreUpdate.totalPoints}**`;
       await interaction.update({
         components: rows,
       });
@@ -3024,6 +3035,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         reply: { messageReference: interaction.message.id },
         allowedMentions: { repliedUser: false },
       });
+      if (scoreUpdate.reachedWin) {
+        await interaction.channel.send({
+          content: `🏆 המשחק הסתיים! <@${interaction.user.id}> הגיע ל-${QUOTE_GAME_WIN_POINTS} נקודות וניצח!\n🔄 הניקוד אופס ומתחילים סבב חדש.`,
+        });
+      }
       return;
     }
     if (interaction.customId.startsWith("optimizecharms:cloth:")) {
