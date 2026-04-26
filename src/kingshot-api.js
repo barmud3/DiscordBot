@@ -34,6 +34,112 @@ const transferCache = new Map();
 const TRANSFER_CACHE_TTL_MS = 5 * 60_000;
 const transferHistoryCache = new Map();
 const TRANSFER_HISTORY_CACHE_TTL_MS = 10 * 60_000;
+const atlasKvkCache = new Map();
+const ATLAS_KVK_CACHE_TTL_MS = 5 * 60_000;
+const ATLAS_SUPABASE_URL =
+  process.env.ATLAS_SUPABASE_URL || "https://qdczmafwcvnwfvixxbwg.supabase.co";
+const ATLAS_SUPABASE_ANON_KEY =
+  process.env.ATLAS_SUPABASE_ANON_KEY ||
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkY3ptYWZ3Y3Zud2Z2aXh4YndnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk0NzI3OTUsImV4cCI6MjA4NTA0ODc5NX0.qLSzVgL192jpCRuOZ80S_ocTbKXlDuq0yZTH5fJ6DmM";
+const ENABLE_ATLAS_KVK_FALLBACK = String(process.env.ENABLE_ATLAS_KVK_FALLBACK || "true").toLowerCase() !== "false";
+
+function normalizeKvkWinnerByPerspective(resultCode, kingdomId, opponentKingdom) {
+  const code = String(resultCode || "").trim().toUpperCase();
+  if (code === "W") return Number(kingdomId);
+  if (code === "L") return Number(opponentKingdom) > 0 ? Number(opponentKingdom) : 0;
+  return 0;
+}
+
+function normalizeAtlasKvkMatch(row, kingdomId) {
+  const k = Number(kingdomId);
+  const opponent = Number(row?.opponent_kingdom);
+  const kingdomA = Number.isFinite(opponent) && opponent > 0 ? Math.min(k, opponent) : k;
+  const kingdomB = Number.isFinite(opponent) && opponent > 0 ? Math.max(k, opponent) : 0;
+  const seasonId = Number(row?.kvk_number ?? 0);
+  const atlasSyntheticId = seasonId > 0 ? Number(`900000${seasonId}`) : 0;
+  const prepWinner = normalizeKvkWinnerByPerspective(row?.prep_result, k, opponent);
+  const castleWinner = normalizeKvkWinnerByPerspective(row?.battle_result, k, opponent);
+  return {
+    kvk_id: atlasSyntheticId,
+    season_id: seasonId,
+    kvk_title: seasonId > 0 ? `KvK #${seasonId}` : "KvK",
+    kingdom_a: kingdomA,
+    kingdom_b: kingdomB,
+    prep_winner: prepWinner,
+    castle_winner: castleWinner,
+    source: "atlas",
+  };
+}
+
+async function fetchAtlasKvkMatchesForKingdom(kingdomId) {
+  if (!ENABLE_ATLAS_KVK_FALLBACK) {
+    return { ok: true, data: [] };
+  }
+  const id = Number(kingdomId);
+  if (!Number.isFinite(id) || id <= 0) {
+    return { ok: false, code: "BAD_REQUEST", message: "Invalid kingdom ID." };
+  }
+  const cacheKey = String(Math.floor(id));
+  const cached = atlasKvkCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < ATLAS_KVK_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data };
+  }
+
+  const query = new URLSearchParams();
+  query.set("kingdom_number", `eq.${Math.floor(id)}`);
+  query.set(
+    "select",
+    "kingdom_number,kvk_number,opponent_kingdom,prep_result,battle_result,overall_result,kvk_date,order_index"
+  );
+  query.set("order", "kvk_number.desc");
+
+  const url = `${ATLAS_SUPABASE_URL}/rest/v1/kvk_history?${query.toString()}`;
+  let res;
+  try {
+    res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        apikey: ATLAS_SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${ATLAS_SUPABASE_ANON_KEY}`,
+      },
+    });
+  } catch (_) {
+    return {
+      ok: false,
+      code: "NETWORK",
+      message: "Could not reach Atlas KvK source.",
+    };
+  }
+  if (!res.ok) {
+    return {
+      ok: false,
+      code: "BAD_RESPONSE",
+      message: `Atlas KvK source returned status ${res.status}.`,
+    };
+  }
+
+  let body;
+  try {
+    body = await res.json();
+  } catch (_) {
+    return {
+      ok: false,
+      code: "BAD_RESPONSE",
+      message: "Unexpected response from Atlas KvK source.",
+    };
+  }
+  if (!Array.isArray(body)) {
+    return {
+      ok: false,
+      code: "BAD_RESPONSE",
+      message: "Unexpected Atlas KvK payload shape.",
+    };
+  }
+
+  const normalized = body.map((row) => normalizeAtlasKvkMatch(row, id));
+  atlasKvkCache.set(cacheKey, { at: Date.now(), data: normalized });
+  return { ok: true, data: normalized };
+}
 
 /**
  * @param {string} playerId
@@ -208,7 +314,13 @@ async function fetchKvkMatchesForKingdom(options) {
   let hasMoreA = true;
   while (hasMoreA && pageA <= maxPages) {
     const res = await fetchKvkMatches({ page: pageA, limit, kingdomA: kingdomId });
-    if (!res.ok) return res;
+    if (!res.ok) {
+      const atlasFallback = await fetchAtlasKvkMatchesForKingdom(kingdomId);
+      if (atlasFallback.ok && atlasFallback.data.length > 0) {
+        return { ok: true, data: atlasFallback.data };
+      }
+      return res;
+    }
     collectedA.push(...res.data);
     hasMoreA = Boolean(res.pagination?.hasMore);
     pageA += 1;
@@ -218,16 +330,44 @@ async function fetchKvkMatchesForKingdom(options) {
   let hasMoreB = true;
   while (hasMoreB && pageB <= maxPages) {
     const res = await fetchKvkMatches({ page: pageB, limit, kingdomB: kingdomId });
-    if (!res.ok) return res;
+    if (!res.ok) {
+      const atlasFallback = await fetchAtlasKvkMatchesForKingdom(kingdomId);
+      if (atlasFallback.ok && atlasFallback.data.length > 0) {
+        return { ok: true, data: atlasFallback.data };
+      }
+      return res;
+    }
     collectedB.push(...res.data);
     hasMoreB = Boolean(res.pagination?.hasMore);
     pageB += 1;
   }
 
-  const merged = [...collectedA, ...collectedB];
+  const kingshotMerged = [...collectedA, ...collectedB];
+  const atlasRes = await fetchAtlasKvkMatchesForKingdom(kingdomId);
+  const atlasData = atlasRes.ok ? atlasRes.data : [];
+  // Keep kingshot.net as authoritative for overlapping seasons/matchups.
+  const merged = [...atlasData, ...kingshotMerged];
+
   const deduped = Array.from(
-    new Map(merged.map((m) => [String(m.kvk_id ?? `${m.season_id}-${m.kingdom_a}-${m.kingdom_b}`), m])).values()
-  ).sort((x, y) => Number(y.kvk_id ?? 0) - Number(x.kvk_id ?? 0));
+    new Map(
+      merged.map((m) => {
+        const ka = Number(m.kingdom_a ?? 0);
+        const kb = Number(m.kingdom_b ?? 0);
+        const low = Math.min(ka || 0, kb || 0);
+        const high = Math.max(ka || 0, kb || 0);
+        const season = Number(m.season_id ?? 0);
+        const key =
+          season > 0 && (low > 0 || high > 0)
+            ? `s:${season}:k:${low}-${high}`
+            : String(m.kvk_id ?? `${m.season_id}-${m.kingdom_a}-${m.kingdom_b}`);
+        return [key, m];
+      })
+    ).values()
+  ).sort((x, y) => {
+    const seasonDiff = Number(y.season_id ?? 0) - Number(x.season_id ?? 0);
+    if (seasonDiff !== 0) return seasonDiff;
+    return Number(y.kvk_id ?? 0) - Number(x.kvk_id ?? 0);
+  });
 
   return { ok: true, data: deduped };
 }

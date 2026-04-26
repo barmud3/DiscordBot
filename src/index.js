@@ -689,12 +689,30 @@ function buildKvkMatchesEmbeds(matches, options, pagination) {
     let perspective = "UNKNOWN";
     if (Number.isFinite(Number(options.kingdomId))) {
       const k = Number(options.kingdomId);
-      if (Number(m.castle_winner) === k) perspective = "WIN";
-      else if (Number(m.kingdom_a) === k || Number(m.kingdom_b) === k) perspective = "LOSS";
+      const isParticipant = Number(m.kingdom_a) === k || Number(m.kingdom_b) === k;
+      const prepWinnerNum = Number(m.prep_winner);
+      const castleWinnerNum = Number(m.castle_winner);
+      const prepKnown = Number.isFinite(prepWinnerNum) && prepWinnerNum > 0;
+      const castleKnown = Number.isFinite(castleWinnerNum) && castleWinnerNum > 0;
+      if (isParticipant && prepKnown && castleKnown) {
+        const prepWin = prepWinnerNum === k;
+        const castleWin = castleWinnerNum === k;
+        if (prepWin && castleWin) perspective = "WIN";
+        else if (!prepWin && !castleWin) perspective = "LOSS";
+        else perspective = "SPLIT";
+      } else if (isParticipant && castleKnown) {
+        perspective = castleWinnerNum === k ? "WIN" : "LOSS";
+      }
     }
 
     const resultBadge =
-      perspective === "WIN" ? "🟢 WIN" : perspective === "LOSS" ? "🔴 LOSS" : "⚪ UNKNOWN";
+      perspective === "WIN"
+        ? "🟢 WIN"
+        : perspective === "LOSS"
+          ? "🔴 LOSS"
+          : perspective === "SPLIT"
+            ? "🟠 SPLIT"
+            : "⚪ UNKNOWN";
     const titlePrefix = idx % 3 === 0 ? "" : "│ ";
     const linePrefix = idx % 3 === 0 ? "" : "│ ";
     const valueLines = [
@@ -728,6 +746,10 @@ function buildKvkMatchesEmbeds(matches, options, pagination) {
   const maxEmbeds = 10;
   const limitedChunks = chunks.slice(0, maxEmbeds);
   const truncated = chunks.length > maxEmbeds;
+  const hasAtlasSource = sortedMatches.some((m) => String(m.source || "").toLowerCase() === "atlas");
+  const sourceFooter = hasAtlasSource
+    ? "Source: kingshot.net/api/kvk/matches + ks-atlas.com"
+    : "Source: kingshot.net/api/kvk/matches";
   const embeds = limitedChunks.map((chunkCards, idx) => {
     const titleSuffix = limitedChunks.length > 1 ? ` (Part ${idx + 1}/${limitedChunks.length})` : "";
     const summary = `📊 **Summary** • Matches: **${total}** • Wins: **${wins}** • Losses: **${losses}** • Win Rate: **${winRate}%**`;
@@ -735,7 +757,7 @@ function buildKvkMatchesEmbeds(matches, options, pagination) {
       .setColor(wins >= losses ? 0x2ecc71 : 0xe67e22)
       .setTitle(`Kingshot KVK Matches (${total})${titleSuffix}`)
       .setDescription(idx === 0 ? summary : "More records:")
-      .setFooter({ text: "Source: kingshot.net/api/kvk/matches" });
+      .setFooter({ text: sourceFooter });
 
     if (idx === 0 && options.kingdomId !== undefined) {
       embed.addFields({ name: "Kingdom", value: `#${options.kingdomId}`, inline: false });
