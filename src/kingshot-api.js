@@ -300,49 +300,48 @@ async function fetchKvkMatches(options = {}) {
  * @returns {Promise<{ ok: true, data: any[] } | { ok: false, code: string, message: string }>}
  */
 async function fetchKvkMatchesForKingdom(options) {
+  const perfStart = Date.now();
   const kingdomId = Number(options?.kingdomId);
   if (!Number.isFinite(kingdomId) || kingdomId <= 0) {
     return { ok: false, code: "BAD_REQUEST", message: "Invalid kingdom ID." };
   }
 
   const limit = 50;
-  const maxPages = 200;
-  const collectedA = [];
-  const collectedB = [];
-
-  let pageA = 1;
-  let hasMoreA = true;
-  while (hasMoreA && pageA <= maxPages) {
-    const res = await fetchKvkMatches({ page: pageA, limit, kingdomA: kingdomId });
-    if (!res.ok) {
-      const atlasFallback = await fetchAtlasKvkMatchesForKingdom(kingdomId);
-      if (atlasFallback.ok && atlasFallback.data.length > 0) {
-        return { ok: true, data: atlasFallback.data };
-      }
-      return res;
+  const maxPagesEnv = Number(process.env.KVK_MAX_PAGES_PER_SIDE || 200);
+  const maxPages = Number.isFinite(maxPagesEnv) && maxPagesEnv > 0 ? Math.floor(maxPagesEnv) : 200;
+  const fetchSide = async (sideKey) => {
+    const collected = [];
+    let page = 1;
+    let hasMore = true;
+    let prevSignature = null;
+    while (hasMore && page <= maxPages) {
+      const req = sideKey === "kingdomA" ? { page, limit, kingdomA: kingdomId } : { page, limit, kingdomB: kingdomId };
+      const res = await fetchKvkMatches(req);
+      if (!res.ok) return res;
+      const rows = Array.isArray(res.data) ? res.data : [];
+      const firstId = rows[0]?.kvk_id ?? rows[0]?.season_id ?? "none";
+      const lastId = rows[rows.length - 1]?.kvk_id ?? rows[rows.length - 1]?.season_id ?? "none";
+      const signature = `${rows.length}:${firstId}:${lastId}`;
+      if (signature === prevSignature) break;
+      prevSignature = signature;
+      collected.push(...rows);
+      hasMore = Boolean(res.pagination?.hasMore);
+      if (rows.length === 0) break;
+      page += 1;
     }
-    collectedA.push(...res.data);
-    hasMoreA = Boolean(res.pagination?.hasMore);
-    pageA += 1;
+    return { ok: true, data: collected };
+  };
+
+  const [resA, resB] = await Promise.all([fetchSide("kingdomA"), fetchSide("kingdomB")]);
+  if (!resA.ok || !resB.ok) {
+    const atlasFallback = await fetchAtlasKvkMatchesForKingdom(kingdomId);
+    if (atlasFallback.ok && atlasFallback.data.length > 0) {
+      return { ok: true, data: atlasFallback.data };
+    }
+    return !resA.ok ? resA : resB;
   }
 
-  let pageB = 1;
-  let hasMoreB = true;
-  while (hasMoreB && pageB <= maxPages) {
-    const res = await fetchKvkMatches({ page: pageB, limit, kingdomB: kingdomId });
-    if (!res.ok) {
-      const atlasFallback = await fetchAtlasKvkMatchesForKingdom(kingdomId);
-      if (atlasFallback.ok && atlasFallback.data.length > 0) {
-        return { ok: true, data: atlasFallback.data };
-      }
-      return res;
-    }
-    collectedB.push(...res.data);
-    hasMoreB = Boolean(res.pagination?.hasMore);
-    pageB += 1;
-  }
-
-  const kingshotMerged = [...collectedA, ...collectedB];
+  const kingshotMerged = [...resA.data, ...resB.data];
   const atlasRes = await fetchAtlasKvkMatchesForKingdom(kingdomId);
   const atlasData = atlasRes.ok ? atlasRes.data : [];
   // Keep kingshot.net as authoritative for overlapping seasons/matchups.
@@ -946,6 +945,165 @@ async function fetchTransferHistoryForKingdom(options) {
   return { ok: true, data };
 }
 
+const kvkRanksCache = new Map();
+const KVK_RANKS_CACHE_TTL_MS = 5 * 60_000;
+const kvkExtendedRanksCache = new Map();
+const KVK_EXTENDED_RANKS_CACHE_TTL_MS = 10 * 60_000;
+
+function toFiniteNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function formatRank(rank) {
+  const n = toFiniteNumber(rank);
+  if (!n || n <= 0) return "N/A";
+  return `#${Math.floor(n)}`;
+}
+
+async function fetchKingshotNetRankForKingdom(kingdomId) {
+  const id = Number(kingdomId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  try {
+    const res = await fetch(`https://kingshot.net/api/nexus/kingdoms/${Math.floor(id)}`, {
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return toFiniteNumber(body?.data?.rank);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function fetchOptimizerRankForKingdom(kingdomId) {
+  const id = Number(kingdomId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const parseRank = (text) => {
+    const cleaned = String(text || "").replace(/\s+/g, " ").trim();
+    const m = cleaned.match(/Rank\s*#\s*(\d{1,6})/i) || cleaned.match(/Rank[^0-9#]{0,30}#\s*(\d{1,6})/i);
+    return m ? toFiniteNumber(m[1]) : null;
+  };
+
+  const url = `https://kingshotoptimizer.com/kvk-rankings/kingdom/${Math.floor(id)}`;
+  const mirrorUrl = `https://r.jina.ai/http://kingshotoptimizer.com/kvk-rankings/kingdom/${Math.floor(id)}`;
+  const fetchCanonical = async () => {
+    try {
+      const res = await fetch(url, { headers: { Accept: "text/html,application/xhtml+xml,text/plain,*/*" } });
+      if (!res.ok) return null;
+      return parseRank(await res.text());
+    } catch (_) {
+      return null;
+    }
+  };
+  const fetchMirror = async () => {
+    try {
+      const mirror = await fetch(mirrorUrl, { headers: { Accept: "text/plain" } });
+      if (!mirror.ok) return null;
+      return parseRank(await mirror.text());
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const toAny = (p) => p.then((v) => (v != null ? v : Promise.reject(new Error("no-rank"))));
+  try {
+    return await Promise.any([toAny(fetchCanonical()), toAny(fetchMirror())]);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function fetchAtlasRankForKingdom(kingdomId) {
+  const id = Number(kingdomId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const fetchApi = async () => {
+    try {
+      const query = new URLSearchParams();
+      query.set("kingdom_number", `eq.${Math.floor(id)}`);
+      query.set("select", "current_rank,rank,atlas_score,overall_score");
+      query.set("limit", "1");
+      const res = await fetch(`${ATLAS_SUPABASE_URL}/rest/v1/kingdoms?${query.toString()}`, {
+        headers: {
+          Accept: "application/json",
+          apikey: ATLAS_SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${ATLAS_SUPABASE_ANON_KEY}`,
+        },
+      });
+      if (!res.ok) return null;
+      const body = await res.json();
+      const row = Array.isArray(body) ? body[0] : null;
+      const direct = toFiniteNumber(row?.current_rank ?? row?.rank);
+      return direct && direct > 0 ? direct : null;
+    } catch (_) {
+      return null;
+    }
+  };
+  const fetchMirror = async () => {
+    try {
+      const mirror = await fetch(`https://r.jina.ai/http://ks-atlas.com/kingdom/${Math.floor(id)}`, {
+        headers: { Accept: "text/plain" },
+      });
+      if (!mirror.ok) return null;
+      const text = String(await mirror.text()).replace(/\s+/g, " ");
+      const m = text.match(/Atlas\s*Rank\s*:?\s*#\s*(\d{1,6})/i) || text.match(/Rank\s*#\s*(\d{1,6})\s*of\s*\d+/i);
+      return m ? toFiniteNumber(m[1]) : null;
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const toAny = (p) => p.then((v) => (v != null ? v : Promise.reject(new Error("no-rank"))));
+  try {
+    return await Promise.any([toAny(fetchApi()), toAny(fetchMirror())]);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * @param {{ kingdomId: number }} options
+ * @returns {Promise<{ ok: true, data: { kingshotNetRank: string } }>}
+ */
+async function fetchKvkSourceRanksForKingdom(options) {
+  const kingdomId = Number(options?.kingdomId);
+  const cacheKey = String(Math.floor(kingdomId));
+  const cached = kvkRanksCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < KVK_RANKS_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data };
+  }
+  const kNet = await fetchKingshotNetRankForKingdom(kingdomId);
+  const data = {
+    kingshotNetRank: formatRank(kNet),
+  };
+  kvkRanksCache.set(cacheKey, { at: Date.now(), data });
+  return { ok: true, data };
+}
+
+/**
+ * Secondary/slow ranks for progressive UI updates.
+ * @param {{ kingdomId: number }} options
+ * @returns {Promise<{ ok: true, data: { kingshotOptimizerRank: string, kingshotAtlasRank: string } }>}
+ */
+async function fetchKvkExtendedRanksForKingdom(options) {
+  const kingdomId = Number(options?.kingdomId);
+  const cacheKey = String(Math.floor(kingdomId));
+  const cached = kvkExtendedRanksCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < KVK_EXTENDED_RANKS_CACHE_TTL_MS) {
+    return { ok: true, data: cached.data };
+  }
+  const [opt, atlas] = await Promise.all([
+    fetchOptimizerRankForKingdom(kingdomId),
+    fetchAtlasRankForKingdom(kingdomId),
+  ]);
+  const data = {
+    kingshotOptimizerRank: formatRank(opt),
+    kingshotAtlasRank: formatRank(atlas),
+  };
+  kvkExtendedRanksCache.set(cacheKey, { at: Date.now(), data });
+  return { ok: true, data };
+}
+
 module.exports = {
   CHARM_LEVEL_API_KEYS,
   fetchPlayerInfo,
@@ -956,4 +1114,6 @@ module.exports = {
   fetchCharmsOptimization,
   fetchTransferWindows,
   fetchTransferHistoryForKingdom,
+  fetchKvkSourceRanksForKingdom,
+  fetchKvkExtendedRanksForKingdom,
 };

@@ -24,6 +24,8 @@ const {
 const {
   fetchPlayerInfo,
   fetchKvkMatchesForKingdom,
+  fetchKvkSourceRanksForKingdom,
+  fetchKvkExtendedRanksForKingdom,
   fetchKingdomTrackerById,
   fetchTransferWindows,
   fetchTransferHistoryForKingdom,
@@ -761,6 +763,21 @@ function buildKvkMatchesEmbeds(matches, options, pagination) {
 
     if (idx === 0 && options.kingdomId !== undefined) {
       embed.addFields({ name: "Kingdom", value: `#${options.kingdomId}`, inline: false });
+      if (options.ranks) {
+        const optRank =
+          options.ranks.kingshotOptimizerRank != null ? options.ranks.kingshotOptimizerRank : "Loading...";
+        const atlasRank =
+          options.ranks.kingshotAtlasRank != null ? options.ranks.kingshotAtlasRank : "Loading...";
+        embed.addFields({
+          name: "Ranks",
+          value: [
+            `• Rank at kingshot.net: **${options.ranks.kingshotNetRank ?? "N/A"}**`,
+            `• Rank at kingshot optimizer: **${optRank}**`,
+            `• Rank at kingshot atlas: **${atlasRank}**`,
+          ].join("\n"),
+          inline: false,
+        });
+      }
     }
     if (idx === 0 && pagination && pagination.total !== undefined) {
       embed.addFields({
@@ -1474,7 +1491,10 @@ async function handlePublicApiShortcuts(message) {
     if (text.length >= 1 && text.length <= 4) {
       const kingdomId = parseInt(text, 10);
       if (!Number.isFinite(kingdomId) || kingdomId <= 0) return false;
-      const res = await fetchKvkMatchesForKingdom({ kingdomId });
+      const [res, ranksRes] = await Promise.all([
+        fetchKvkMatchesForKingdom({ kingdomId }),
+        fetchKvkSourceRanksForKingdom({ kingdomId }),
+      ]);
       if (!res.ok) {
         await message.reply(res.message || "Could not fetch KvK matches right now.");
         return true;
@@ -1484,7 +1504,16 @@ async function handlePublicApiShortcuts(message) {
         await message.reply(`No KvK matches found for kingdom #${kingdomId}.`);
         return true;
       }
-      await message.reply({ embeds: buildKvkMatchesEmbeds(rows, { kingdomId }, null) });
+      const initialRanks = { ...(ranksRes?.data || {}), kingshotOptimizerRank: null, kingshotAtlasRank: null };
+      const sent = await message.reply({ embeds: buildKvkMatchesEmbeds(rows, { kingdomId, ranks: initialRanks }, null) });
+      fetchKvkExtendedRanksForKingdom({ kingdomId })
+        .then((extended) => {
+          const merged = { ...initialRanks, ...(extended?.data || {}) };
+          return sent.edit({ embeds: buildKvkMatchesEmbeds(rows, { kingdomId, ranks: merged }, null) });
+        })
+        .catch(() => {
+          /* keep fast initial response */
+        });
       return true;
     }
   }
@@ -1522,7 +1551,10 @@ async function handleKvkMatches(interaction) {
     return;
   }
 
-  const res = await fetchKvkMatchesForKingdom({ kingdomId });
+  const [res, ranksRes] = await Promise.all([
+    fetchKvkMatchesForKingdom({ kingdomId }),
+    fetchKvkSourceRanksForKingdom({ kingdomId }),
+  ]);
   if (!res.ok) {
     await interaction.editReply({
       content: res.message || "Could not fetch KvK matches right now.",
@@ -1536,7 +1568,16 @@ async function handleKvkMatches(interaction) {
     return;
   }
 
-  await interaction.editReply({ embeds: buildKvkMatchesEmbeds(rows, { kingdomId }, null) });
+  const initialRanks = { ...(ranksRes?.data || {}), kingshotOptimizerRank: null, kingshotAtlasRank: null };
+  await interaction.editReply({ embeds: buildKvkMatchesEmbeds(rows, { kingdomId, ranks: initialRanks }, null) });
+  fetchKvkExtendedRanksForKingdom({ kingdomId })
+    .then((extended) => {
+      const merged = { ...initialRanks, ...(extended?.data || {}) };
+      return interaction.editReply({ embeds: buildKvkMatchesEmbeds(rows, { kingdomId, ranks: merged }, null) });
+    })
+    .catch(() => {
+      /* keep fast initial response */
+    });
 }
 
 async function handleKingdomAge(interaction) {
