@@ -97,6 +97,8 @@ const localBrandImagePath = path.join(__dirname, "..", "img", "pazam.png");
 const localBrandImageName = "pazam.png";
 const nicknameChannelId = (process.env.NICKNAME_CHANNEL_ID || "").trim();
 const enableNicknameChannel = Boolean(nicknameChannelId);
+const gameChannelId = (process.env.GAME_CHANNEL_ID || "").trim();
+const sourceChannelId = (process.env.SOURCE_CHANNEL_ID || "1438443128045436979").trim();
 const nicknameCooldownSec = Math.max(
   0,
   Number.parseInt(String(process.env.NICKNAME_COOLDOWN_SECONDS || "60"), 10) || 0
@@ -246,6 +248,7 @@ const commands = [
         .setRequired(false)
         .setMinValue(1)
     ),
+  new SlashCommandBuilder().setName("quote").setDescription("מי אמר את זה?"),
   new SlashCommandBuilder()
     .setName("optimizegovgear")
     .setDescription("Prepare governor gear optimization request")
@@ -1702,6 +1705,407 @@ async function handleTransfers(interaction) {
   await interaction.editReply({ content });
 }
 
+function shuffleArray(items) {
+  const arr = Array.from(items || []);
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function sampleArray(items, count) {
+  return shuffleArray(items).slice(0, Math.max(0, count));
+}
+
+function isEmojiOnlyText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+  const compact = raw.replace(/\s+/g, "");
+  if (!compact) return false;
+  const withoutCustom = compact.replace(/<a?:\w+:\d+>/g, "");
+  const withoutUnicodeEmoji = withoutCustom.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, "");
+  return withoutUnicodeEmoji.length === 0;
+}
+
+function isValidQuoteContent(content) {
+  const text = String(content || "").trim();
+  if (!text) return false;
+  if (text.length < 3) return false;
+  if (text.startsWith("!") || text.startsWith("/")) return false;
+  if (isEmojiOnlyText(text)) return false;
+  return true;
+}
+
+async function resolveQuoteGameOptions(sourceChannel, messages, correctAuthorId) {
+  const uniqueById = new Map();
+  for (const msg of messages.values()) {
+    if (!msg?.author?.id || msg.author.bot) continue;
+    if (msg.author.id === correctAuthorId) continue;
+    if (!uniqueById.has(msg.author.id)) {
+      uniqueById.set(msg.author.id, { id: msg.author.id, username: msg.author.username || "משתמש" });
+    }
+  }
+
+  let options = sampleArray(Array.from(uniqueById.values()), 3);
+  if (options.length >= 3) return options;
+
+  try {
+    const guildMembers = await sourceChannel.guild.members.fetch();
+    for (const member of guildMembers.values()) {
+      const user = member?.user;
+      if (!user?.id || user.bot) continue;
+      if (user.id === correctAuthorId) continue;
+      if (!uniqueById.has(user.id)) {
+        uniqueById.set(user.id, { id: user.id, username: user.username || member.displayName || "משתמש" });
+      }
+      if (uniqueById.size >= 30) break;
+    }
+    options = sampleArray(Array.from(uniqueById.values()), 3);
+  } catch (_) {
+    // Best effort fallback only.
+  }
+
+  return options;
+}
+
+async function resolveDisplayNameInGuild(guild, userId, fallbackName) {
+  if (!guild || !userId) return String(fallbackName || "משתמש");
+  try {
+    const member = await guild.members.fetch(userId);
+    const nick = String(member?.displayName || "").trim();
+    if (nick) return nick;
+  } catch (_) {
+    // ignore
+  }
+  return String(fallbackName || "משתמש");
+}
+
+function bidiIsolate(value) {
+  return `\u2068${String(value || "").trim()}\u2069`;
+}
+
+function buildPublicQuoteResultMessage({ clickerName, selectedName, isCorrect, correctName }) {
+  const rlm = "\u200F";
+  const firstLine = `${rlm}${bidiIsolate(clickerName)} בחר ב`;
+  const secondLine = `${rlm}${bidiIsolate(selectedName)}`;
+  const thirdLine = `${rlm}${isCorrect ? "✅ צדק" : "❌ טעה"}`;
+  const fourthLine = isCorrect ? "" : `${rlm}הנכון: ${bidiIsolate(correctName)}`;
+  return [firstLine, secondLine, thirdLine, fourthLine].filter(Boolean).join("\n");
+}
+
+function areAllQuoteButtonsDisabled(message) {
+  const rows = Array.isArray(message?.components) ? message.components : [];
+  const quoteButtons = [];
+  for (const row of rows) {
+    for (const comp of row?.components || []) {
+      if (typeof comp?.customId === "string" && (comp.customId.startsWith("quotegame:") || comp.customId.startsWith("quotegameimg:"))) {
+        quoteButtons.push(comp);
+      }
+    }
+  }
+  if (quoteButtons.length === 0) return false;
+  return quoteButtons.every((b) => Boolean(b.disabled));
+}
+
+function buildDisabledQuoteRows(message) {
+  const rows = Array.isArray(message?.components) ? message.components : [];
+  const out = [];
+  for (const row of rows) {
+    const rebuilt = (row?.components || []).map((comp) => {
+      const customId = String(comp?.customId || "");
+      if (customId.startsWith("quotegame:") || customId.startsWith("quotegameimg:")) {
+        return ButtonBuilder.from(comp).setDisabled(true);
+      }
+      return ButtonBuilder.from(comp);
+    });
+    out.push(new ActionRowBuilder().addComponents(...rebuilt));
+  }
+  return out;
+}
+
+async function handleQuoteCommand(interaction) {
+  if (!gameChannelId || !sourceChannelId) {
+    await interaction.reply({ content: "הגדרת המשחק חסרה כרגע. נסה שוב מאוחר יותר 🙏", flags: MessageFlags.Ephemeral });
+    return;
+  }
+  if (interaction.channelId !== gameChannelId) {
+    await interaction.reply({ content: "המשחק זמין רק בערוץ הייעודי 🎮", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  let sourceChannel;
+  try {
+    sourceChannel = await interaction.client.channels.fetch(sourceChannelId);
+  } catch (_) {
+    sourceChannel = null;
+  }
+  if (!sourceChannel || !sourceChannel.isTextBased() || typeof sourceChannel.messages?.fetch !== "function") {
+    await interaction.reply({ content: "אין גישה לערוץ ההודעות 😅", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  let fetched;
+  try {
+    fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+  } catch (_) {
+    await interaction.reply({ content: "אין גישה לערוץ ההודעות 😅", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  if (!fetched || fetched.size < 10) {
+    await interaction.reply({ content: "אין מספיק פעילות בערוץ המקור", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const validMessages = Array.from(fetched.values()).filter((msg) => {
+    if (!msg || !msg.author || msg.author.bot) return false;
+    return isValidQuoteContent(msg.content);
+  });
+
+  if (validMessages.length === 0) {
+    await interaction.reply({ content: "אין מספיק הודעות בערוץ המקור 😅", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const picked = validMessages[Math.floor(Math.random() * validMessages.length)];
+  const optionPool = await resolveQuoteGameOptions(sourceChannel, fetched, picked.author.id);
+  if (optionPool.length < 3) {
+    await interaction.reply({ content: "אין מספיק פעילות בערוץ המקור", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const options = shuffleArray([
+    { id: picked.author.id, username: picked.author.username || "משתמש" },
+    ...optionPool.slice(0, 3),
+  ]);
+  if (new Set(options.map((u) => u.id)).size < 4) {
+    await interaction.reply({ content: "אין מספיק פעילות בערוץ המקור", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  for (const opt of options) {
+    opt.label = await resolveDisplayNameInGuild(interaction.guild, opt.id, opt.username);
+  }
+
+  const rows = [];
+  for (let i = 0; i < options.length; i += 2) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        ...options.slice(i, i + 2).map((u) =>
+          new ButtonBuilder()
+            .setCustomId(`quotegame:${picked.author.id}:${u.id}`)
+            .setLabel(String(u.label || u.username || "משתמש").slice(0, 80))
+            .setStyle(ButtonStyle.Primary)
+        )
+      )
+    );
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle("🧠 מי אמר את זה?")
+    .setDescription(`> "${String(picked.content || "").trim()}"`);
+
+  await interaction.reply({ embeds: [embed], components: rows });
+}
+
+async function startQuoteGameInMessage(message) {
+  if (!gameChannelId || !sourceChannelId) return false;
+  if (message.channelId !== gameChannelId) return false;
+  const text = String(message.content || "").trim().toLowerCase();
+  if (text !== "play" && text !== "שחק") return false;
+
+  let sourceChannel;
+  try {
+    sourceChannel = await message.client.channels.fetch(sourceChannelId);
+  } catch (_) {
+    sourceChannel = null;
+  }
+  if (!sourceChannel || !sourceChannel.isTextBased() || typeof sourceChannel.messages?.fetch !== "function") {
+    await message.reply("אין גישה לערוץ ההודעות 😅");
+    return true;
+  }
+
+  let fetched;
+  try {
+    fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+  } catch (_) {
+    await message.reply("אין גישה לערוץ ההודעות 😅");
+    return true;
+  }
+
+  if (!fetched || fetched.size < 10) {
+    await message.reply("אין מספיק פעילות בערוץ המקור");
+    return true;
+  }
+
+  const validMessages = Array.from(fetched.values()).filter((msg) => {
+    if (!msg || !msg.author || msg.author.bot) return false;
+    return isValidQuoteContent(msg.content);
+  });
+  if (validMessages.length === 0) {
+    await message.reply("אין מספיק הודעות בערוץ המקור 😅");
+    return true;
+  }
+
+  const picked = validMessages[Math.floor(Math.random() * validMessages.length)];
+  const optionPool = await resolveQuoteGameOptions(sourceChannel, fetched, picked.author.id);
+  if (optionPool.length < 3) {
+    await message.reply("אין מספיק פעילות בערוץ המקור");
+    return true;
+  }
+
+  const options = shuffleArray([
+    { id: picked.author.id, username: picked.author.username || "משתמש" },
+    ...optionPool.slice(0, 3),
+  ]);
+  if (new Set(options.map((u) => u.id)).size < 4) {
+    await message.reply("אין מספיק פעילות בערוץ המקור");
+    return true;
+  }
+
+  for (const opt of options) {
+    opt.label = await resolveDisplayNameInGuild(message.guild, opt.id, opt.username);
+  }
+
+  const rows = [];
+  for (let i = 0; i < options.length; i += 2) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        ...options.slice(i, i + 2).map((u) =>
+          new ButtonBuilder()
+            .setCustomId(`quotegame:${picked.author.id}:${u.id}`)
+            .setLabel(String(u.label || u.username || "משתמש").slice(0, 80))
+            .setStyle(ButtonStyle.Primary)
+        )
+      )
+    );
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle("🧠 מי אמר את זה?")
+    .setDescription(`> "${String(picked.content || "").trim()}"`);
+
+  await message.reply({ embeds: [embed], components: rows });
+  return true;
+}
+
+function isImageAttachment(att) {
+  const contentType = String(att?.contentType || "").toLowerCase();
+  if (contentType.startsWith("image/")) return true;
+  const name = String(att?.name || "").toLowerCase();
+  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
+}
+
+async function startImageQuoteGameInMessage(message) {
+  if (!gameChannelId || !sourceChannelId) return false;
+  if (message.channelId !== gameChannelId) return false;
+  const text = String(message.content || "").trim().toLowerCase();
+  if (text !== "שחק עם תמונה" && text !== "שחק עם תמונות") return false;
+
+  let sourceChannel;
+  try {
+    sourceChannel = await message.client.channels.fetch(sourceChannelId);
+  } catch (_) {
+    sourceChannel = null;
+  }
+  if (!sourceChannel || !sourceChannel.isTextBased() || typeof sourceChannel.messages?.fetch !== "function") {
+    await message.reply("אין גישה לערוץ ההודעות 😅");
+    return true;
+  }
+
+  let fetched;
+  try {
+    fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+  } catch (_) {
+    await message.reply("אין גישה לערוץ ההודעות 😅");
+    return true;
+  }
+
+  if (!fetched || fetched.size < 10) {
+    await message.reply("אין מספיק פעילות בערוץ המקור");
+    return true;
+  }
+
+  const validImageMessages = Array.from(fetched.values()).filter((msg) => {
+    if (!msg || !msg.author || msg.author.bot) return false;
+    if (!msg.attachments || msg.attachments.size === 0) return false;
+    return Array.from(msg.attachments.values()).some((a) => isImageAttachment(a));
+  });
+  if (validImageMessages.length === 0) {
+    await message.reply("אין מספיק תמונות בערוץ המקור 😅");
+    return true;
+  }
+
+  const picked = validImageMessages[Math.floor(Math.random() * validImageMessages.length)];
+  const pickedImage = Array.from(picked.attachments.values()).find((a) => isImageAttachment(a));
+  if (!pickedImage?.url) {
+    await message.reply("לא הצלחתי למשוך תמונה תקינה מהערוץ 😅");
+    return true;
+  }
+
+  const optionPool = await resolveQuoteGameOptions(sourceChannel, fetched, picked.author.id);
+  if (optionPool.length < 3) {
+    await message.reply("אין מספיק פעילות בערוץ המקור");
+    return true;
+  }
+
+  const options = shuffleArray([
+    { id: picked.author.id, username: picked.author.username || "משתמש" },
+    ...optionPool.slice(0, 3),
+  ]);
+  if (new Set(options.map((u) => u.id)).size < 4) {
+    await message.reply("אין מספיק פעילות בערוץ המקור");
+    return true;
+  }
+
+  for (const opt of options) {
+    opt.label = await resolveDisplayNameInGuild(message.guild, opt.id, opt.username);
+  }
+
+  const rows = [];
+  for (let i = 0; i < options.length; i += 2) {
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        ...options.slice(i, i + 2).map((u) =>
+          new ButtonBuilder()
+            .setCustomId(`quotegameimg:${picked.author.id}:${u.id}`)
+            .setLabel(String(u.label || u.username || "משתמש").slice(0, 80))
+            .setStyle(ButtonStyle.Primary)
+        )
+      )
+    );
+  }
+
+  const embed = new EmbedBuilder().setColor(0x5865f2).setTitle("🖼️ מי שלח את התמונה הזו?").setImage(pickedImage.url);
+  await message.reply({ embeds: [embed], components: rows });
+  return true;
+}
+
+async function fetchRecentSourceMessages(sourceChannel, maxMessages = 500) {
+  const max = Math.max(10, Math.min(1000, Number(maxMessages) || 500));
+  const all = new Map();
+  let before;
+
+  while (all.size < max) {
+    const remaining = max - all.size;
+    const batchSize = Math.min(100, remaining);
+    const batch = await sourceChannel.messages.fetch(before ? { limit: batchSize, before } : { limit: batchSize });
+    if (!batch || batch.size === 0) break;
+    for (const [id, msg] of batch.entries()) {
+      all.set(id, msg);
+    }
+    if (batch.size < batchSize) break;
+    const last = batch.last();
+    if (!last?.id || last.id === before) break;
+    before = last.id;
+  }
+
+  return all;
+}
+
 async function handleOptimizeGovGear(interaction) {
   const satin = interaction.options.getInteger("satin", true);
   const gildedThreads = interaction.options.getInteger("gilded_threads", true);
@@ -2409,7 +2813,7 @@ const client = new Client({
     status: "online",
     activities: [
       {
-        name: "/kingshot /kvkmatches /kingdomage /transfers /optimizegovgear /optimizecharms",
+        name: "/kingshot /kvkmatches /kingdomage /transfers /quote /optimizegovgear /optimizecharms",
         type: ActivityType.Watching,
       },
     ],
@@ -2458,6 +2862,96 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.isButton()) {
+    if (interaction.customId.startsWith("quotegameimg:")) {
+      const parts = interaction.customId.split(":");
+      const correctUserId = parts[1];
+      const selectedUserId = parts[2];
+      if (areAllQuoteButtonsDisabled(interaction.message)) {
+        await interaction.reply({ content: "הסבב הזה כבר נסגר ✋", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      if (!correctUserId || !selectedUserId) {
+        await interaction.reply({ content: "אירעה שגיאה במשחק. נסו שוב 🙏" });
+        return;
+      }
+      const clickerName = await resolveDisplayNameInGuild(interaction.guild, interaction.user.id, interaction.user.username);
+      const selectedName = await resolveDisplayNameInGuild(
+        interaction.guild,
+        selectedUserId,
+        interaction.component?.label || "משתמש"
+      );
+      let correctUsername = "לא ידוע";
+      try {
+        const user = await interaction.client.users.fetch(correctUserId);
+        if (user?.username) {
+          correctUsername = await resolveDisplayNameInGuild(interaction.guild, correctUserId, user.username);
+        }
+      } catch (_) {
+        // ignore
+      }
+      const rows = buildDisabledQuoteRows(interaction.message);
+      const isCorrect = selectedUserId === correctUserId;
+      const resultText = buildPublicQuoteResultMessage({
+        clickerName,
+        selectedName,
+        isCorrect,
+        correctName: correctUsername,
+      });
+      await interaction.update({
+        components: rows,
+      });
+      await interaction.channel.send({
+        content: resultText,
+        reply: { messageReference: interaction.message.id },
+        allowedMentions: { repliedUser: false },
+      });
+      return;
+    }
+    if (interaction.customId.startsWith("quotegame:")) {
+      const parts = interaction.customId.split(":");
+      const correctUserId = parts[1];
+      const selectedUserId = parts[2];
+      if (areAllQuoteButtonsDisabled(interaction.message)) {
+        await interaction.reply({ content: "הסבב הזה כבר נסגר ✋", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      if (!correctUserId || !selectedUserId) {
+        await interaction.reply({ content: "אירעה שגיאה במשחק. נסו שוב 🙏" });
+        return;
+      }
+      const clickerName = await resolveDisplayNameInGuild(interaction.guild, interaction.user.id, interaction.user.username);
+      const selectedName = await resolveDisplayNameInGuild(
+        interaction.guild,
+        selectedUserId,
+        interaction.component?.label || "משתמש"
+      );
+      let correctUsername = "לא ידוע";
+      try {
+        const user = await interaction.client.users.fetch(correctUserId);
+        if (user?.username) {
+          correctUsername = await resolveDisplayNameInGuild(interaction.guild, correctUserId, user.username);
+        }
+      } catch (_) {
+        // ignore
+      }
+      const rows = buildDisabledQuoteRows(interaction.message);
+      const isCorrect = selectedUserId === correctUserId;
+      const resultText = buildPublicQuoteResultMessage({
+        clickerName,
+        selectedName,
+        isCorrect,
+        correctName: correctUsername,
+      });
+      await interaction.update({
+        components: rows,
+      });
+      await interaction.channel.send({
+        content: resultText,
+        reply: { messageReference: interaction.message.id },
+        allowedMentions: { repliedUser: false },
+      });
+      return;
+    }
     if (interaction.customId.startsWith("optimizecharms:cloth:")) {
       const parts = interaction.customId.split(":");
       const requestId = parts[2];
@@ -3090,11 +3584,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (!interaction.isChatInputCommand()) return;
   if (
-    !["kingshot", "kvkmatches", "kingdomage", "transfers", "optimizegovgear", "optimizecharms"].includes(
+    !["kingshot", "kvkmatches", "kingdomage", "transfers", "quote", "optimizegovgear", "optimizecharms"].includes(
       interaction.commandName
     )
   )
     return;
+
+  if (interaction.commandName === "quote") {
+    await handleQuoteCommand(interaction);
+    return;
+  }
 
   const isEphemeralOptimizerSlash =
     interaction.commandName === "optimizegovgear" || interaction.commandName === "optimizecharms";
@@ -3163,6 +3662,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
   try {
+    if (await startImageQuoteGameInMessage(message)) return;
+    if (await startQuoteGameInMessage(message)) return;
     if (message.guild && enableNicknameChannel && message.channelId === nicknameChannelId) {
       await handleNicknameChannelMessage(message);
       return;
