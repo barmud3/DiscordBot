@@ -1,0 +1,43 @@
+tar -czvf C:\Computer_Science\kingshot.tar.gz `
+  --exclude=Kingshot-image `
+  --exclude=KingshotVersions `
+  --exclude=img/Charms `
+  --exclude=node_modules `
+  --exclude=.git `
+  .
+
+------------------------------------------------------------------------------------------------
+
+scp -i "C:\Computer_Science\Kingshot\ssh\barmud.key" "C:\Computer_Science\kingshot.gz" opc@129.159.145.212:/home/opc/
+
+------------------------------------------------------------------------------------------------
+
+ssh -i "C:\Computer_Science\Kingshot\ssh\barmud.key" opc@129.159.145.212
+
+------------------------------------------------------------------------------------------------
+
+pm2 stop kingshot-bot
+pm2 delete kingshot-bot
+
+------------------------------------------------------------------------------------------------
+
+cd ~
+rm -rf kingshot-bot-old
+mv kingshot-bot kingshot-bot-old
+mkdir kingshot-bot
+tar -xzvf kingshot.tar.gz -C kingshot-bot
+cd kingshot-bot
+
+------------------------------------------------------------------------------------------------
+
+npm ci
+
+------------------------------------------------------------------------------------------------
+
+nano .env (if needed)
+
+------------------------------------------------------------------------------------------------
+
+pm2 start npm --name kingshot-bot -- start
+pm2 save
+

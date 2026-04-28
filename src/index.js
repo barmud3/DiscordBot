@@ -375,6 +375,8 @@ const pendingGovGearSubmissions = new Map();
 const govGearChatSessions = new Map();
 const charmsPanelSessions = new Map();
 const govGearModalSessions = new Map();
+const quoteSourceMessagesCache = new Map();
+const QUOTE_SOURCE_MESSAGES_CACHE_TTL_MS = 12_000;
 const GOV_GEAR_MEMORY_FILE = path.resolve(__dirname, "..", "data", "govgear-user-memory.json");
 const CHARMS_MEMORY_FILE = path.resolve(__dirname, "..", "data", "charms-user-memory.json");
 const QUOTE_SCOREBOARD_FILE = path.resolve(__dirname, "..", "data", "quote-scoreboard.json");
@@ -1814,9 +1816,10 @@ async function resolveQuoteGameOptions(sourceChannel, messages, correctAuthorId)
   let options = sampleArray(Array.from(uniqueById.values()), 3);
   if (options.length >= 3) return options;
 
+  // Fast fallback: use members already cached in memory, avoid full guild fetch.
   try {
-    const guildMembers = await sourceChannel.guild.members.fetch();
-    for (const member of guildMembers.values()) {
+    const cacheValues = sourceChannel?.guild?.members?.cache?.values?.() || [];
+    for (const member of cacheValues) {
       const user = member?.user;
       if (!user?.id || user.bot) continue;
       if (user.id === correctAuthorId) continue;
@@ -1827,7 +1830,7 @@ async function resolveQuoteGameOptions(sourceChannel, messages, correctAuthorId)
     }
     options = sampleArray(Array.from(uniqueById.values()), 3);
   } catch (_) {
-    // Best effort fallback only.
+    // Best effort only.
   }
 
   return options;
@@ -1835,6 +1838,18 @@ async function resolveQuoteGameOptions(sourceChannel, messages, correctAuthorId)
 
 async function resolveDisplayNameInGuild(guild, userId, fallbackName) {
   if (!guild || !userId) return String(fallbackName || "משתמש");
+  const cached = guild.members?.cache?.get?.(userId);
+  const cachedNick = String(cached?.displayName || "").trim();
+  if (cachedNick) return cachedNick;
+  // Keep game start fast: avoid blocking API member fetch here.
+  return String(fallbackName || "משתמש");
+}
+
+async function resolveDisplayNameInGuildSlow(guild, userId, fallbackName) {
+  if (!guild || !userId) return String(fallbackName || "משתמש");
+  const cached = guild.members?.cache?.get?.(userId);
+  const cachedNick = String(cached?.displayName || "").trim();
+  if (cachedNick) return cachedNick;
   try {
     const member = await guild.members.fetch(userId);
     const nick = String(member?.displayName || "").trim();
@@ -1898,20 +1913,25 @@ async function handleQuoteCommand(interaction) {
     return;
   }
 
-  let sourceChannel;
-  try {
-    sourceChannel = await interaction.client.channels.fetch(sourceChannelId);
-  } catch (_) {
-    sourceChannel = null;
+  let sourceChannel = interaction.client.channels.cache.get(sourceChannelId);
+  if (!sourceChannel) {
+    try {
+      sourceChannel = await interaction.client.channels.fetch(sourceChannelId);
+    } catch (_) {
+      sourceChannel = null;
+    }
   }
   if (!sourceChannel || !sourceChannel.isTextBased() || typeof sourceChannel.messages?.fetch !== "function") {
     await interaction.reply({ content: "אין גישה לערוץ ההודעות 😅", flags: MessageFlags.Ephemeral });
     return;
   }
 
-  let fetched;
+  let fetched = null;
   try {
-    fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+    fetched = await fetchRecentSourceMessages(sourceChannel, 160);
+    if (!fetched || fetched.size < 40) {
+      fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+    }
   } catch (_) {
     await interaction.reply({ content: "אין גישה לערוץ ההודעות 😅", flags: MessageFlags.Ephemeral });
     return;
@@ -1948,8 +1968,11 @@ async function handleQuoteCommand(interaction) {
     return;
   }
 
-  for (const opt of options) {
-    opt.label = await resolveDisplayNameInGuild(interaction.guild, opt.id, opt.username);
+  const labels = await Promise.all(
+    options.map((opt) => resolveDisplayNameInGuild(interaction.guild, opt.id, opt.username))
+  );
+  for (let i = 0; i < options.length; i += 1) {
+    options[i].label = labels[i];
   }
 
   const rows = [];
@@ -1992,20 +2015,25 @@ async function startQuoteGameInMessage(message) {
   const text = String(message.content || "").trim().toLowerCase();
   if (text !== "play" && text !== "שחק") return false;
 
-  let sourceChannel;
-  try {
-    sourceChannel = await message.client.channels.fetch(sourceChannelId);
-  } catch (_) {
-    sourceChannel = null;
+  let sourceChannel = message.client.channels.cache.get(sourceChannelId);
+  if (!sourceChannel) {
+    try {
+      sourceChannel = await message.client.channels.fetch(sourceChannelId);
+    } catch (_) {
+      sourceChannel = null;
+    }
   }
   if (!sourceChannel || !sourceChannel.isTextBased() || typeof sourceChannel.messages?.fetch !== "function") {
     await message.reply("אין גישה לערוץ ההודעות 😅");
     return true;
   }
 
-  let fetched;
+  let fetched = null;
   try {
-    fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+    fetched = await fetchRecentSourceMessages(sourceChannel, 160);
+    if (!fetched || fetched.size < 40) {
+      fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+    }
   } catch (_) {
     await message.reply("אין גישה לערוץ ההודעות 😅");
     return true;
@@ -2041,8 +2069,11 @@ async function startQuoteGameInMessage(message) {
     return true;
   }
 
-  for (const opt of options) {
-    opt.label = await resolveDisplayNameInGuild(message.guild, opt.id, opt.username);
+  const labels = await Promise.all(
+    options.map((opt) => resolveDisplayNameInGuild(message.guild, opt.id, opt.username))
+  );
+  for (let i = 0; i < options.length; i += 1) {
+    options[i].label = labels[i];
   }
 
   const rows = [];
@@ -2081,20 +2112,25 @@ async function startImageQuoteGameInMessage(message) {
   const text = String(message.content || "").trim().toLowerCase();
   if (text !== "שחק עם תמונה" && text !== "שחק עם תמונות") return false;
 
-  let sourceChannel;
-  try {
-    sourceChannel = await message.client.channels.fetch(sourceChannelId);
-  } catch (_) {
-    sourceChannel = null;
+  let sourceChannel = message.client.channels.cache.get(sourceChannelId);
+  if (!sourceChannel) {
+    try {
+      sourceChannel = await message.client.channels.fetch(sourceChannelId);
+    } catch (_) {
+      sourceChannel = null;
+    }
   }
   if (!sourceChannel || !sourceChannel.isTextBased() || typeof sourceChannel.messages?.fetch !== "function") {
     await message.reply("אין גישה לערוץ ההודעות 😅");
     return true;
   }
 
-  let fetched;
+  let fetched = null;
   try {
-    fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+    fetched = await fetchRecentSourceMessages(sourceChannel, 160);
+    if (!fetched || fetched.size < 40) {
+      fetched = await fetchRecentSourceMessages(sourceChannel, 500);
+    }
   } catch (_) {
     await message.reply("אין גישה לערוץ ההודעות 😅");
     return true;
@@ -2137,8 +2173,11 @@ async function startImageQuoteGameInMessage(message) {
     return true;
   }
 
-  for (const opt of options) {
-    opt.label = await resolveDisplayNameInGuild(message.guild, opt.id, opt.username);
+  const labels = await Promise.all(
+    options.map((opt) => resolveDisplayNameInGuild(message.guild, opt.id, opt.username))
+  );
+  for (let i = 0; i < options.length; i += 1) {
+    options[i].label = labels[i];
   }
 
   const rows = [];
@@ -2162,6 +2201,11 @@ async function startImageQuoteGameInMessage(message) {
 
 async function fetchRecentSourceMessages(sourceChannel, maxMessages = 500) {
   const max = Math.max(10, Math.min(1000, Number(maxMessages) || 500));
+  const cacheKey = `${sourceChannel?.id || "unknown"}:${max}`;
+  const cached = quoteSourceMessagesCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < QUOTE_SOURCE_MESSAGES_CACHE_TTL_MS) {
+    return cached.data;
+  }
   const all = new Map();
   let before;
 
@@ -2179,6 +2223,7 @@ async function fetchRecentSourceMessages(sourceChannel, maxMessages = 500) {
     before = last.id;
   }
 
+  quoteSourceMessagesCache.set(cacheKey, { at: Date.now(), data: all });
   return all;
 }
 
@@ -2950,8 +2995,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.reply({ content: "אירעה שגיאה במשחק. נסו שוב 🙏" });
         return;
       }
-      const clickerName = await resolveDisplayNameInGuild(interaction.guild, interaction.user.id, interaction.user.username);
-      const selectedName = await resolveDisplayNameInGuild(
+      const clickerName = await resolveDisplayNameInGuildSlow(
+        interaction.guild,
+        interaction.user.id,
+        interaction.user.username
+      );
+      const selectedName = await resolveDisplayNameInGuildSlow(
         interaction.guild,
         selectedUserId,
         interaction.component?.label || "משתמש"
@@ -2960,7 +3009,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       try {
         const user = await interaction.client.users.fetch(correctUserId);
         if (user?.username) {
-          correctUsername = await resolveDisplayNameInGuild(interaction.guild, correctUserId, user.username);
+          correctUsername = await resolveDisplayNameInGuildSlow(interaction.guild, correctUserId, user.username);
         }
       } catch (_) {
         // ignore
@@ -3002,8 +3051,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.reply({ content: "אירעה שגיאה במשחק. נסו שוב 🙏" });
         return;
       }
-      const clickerName = await resolveDisplayNameInGuild(interaction.guild, interaction.user.id, interaction.user.username);
-      const selectedName = await resolveDisplayNameInGuild(
+      const clickerName = await resolveDisplayNameInGuildSlow(
+        interaction.guild,
+        interaction.user.id,
+        interaction.user.username
+      );
+      const selectedName = await resolveDisplayNameInGuildSlow(
         interaction.guild,
         selectedUserId,
         interaction.component?.label || "משתמש"
@@ -3012,7 +3065,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       try {
         const user = await interaction.client.users.fetch(correctUserId);
         if (user?.username) {
-          correctUsername = await resolveDisplayNameInGuild(interaction.guild, correctUserId, user.username);
+          correctUsername = await resolveDisplayNameInGuildSlow(interaction.guild, correctUserId, user.username);
         }
       } catch (_) {
         // ignore

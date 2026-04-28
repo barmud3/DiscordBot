@@ -90,5 +90,33 @@
       "gildedThreads": 2400,
       "artisansVision": 650
     }
+  },
+  "1430608088309698581": {
+    "updatedAt": "2026-04-28T18:03:12.130Z",
+    "data": {
+      "hat": "Green⭐",
+      "chain": "Green⭐",
+      "shirt": "Blue⭐⭐",
+      "pants": "Blue⭐",
+      "ring": "Blue",
+      "baton": "Green⭐",
+      "satin": 6700,
+      "gildedThreads": 120,
+      "artisansVision": 45
+    }
+  },
+  "302925120073105408": {
+    "updatedAt": "2026-04-28T18:45:47.069Z",
+    "data": {
+      "hat": "Purple⭐",
+      "chain": "Purple",
+      "shirt": "Gold",
+      "pants": "Purple⭐⭐",
+      "ring": "Purple T1",
+      "baton": "Purple⭐⭐⭐",
+      "satin": 5700,
+      "gildedThreads": 1000,
+      "artisansVision": 2
+    }
   }
 }
